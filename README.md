@@ -70,3 +70,31 @@ web/                WebGL2 renderer, one draw call
 
 This produces *plausible* reactions, not measured public opinion. Outputs are
 synthetic and should be labelled as such wherever they leave the system.
+
+## Phase 2 — the gateway
+
+`cmd/gateway` runs on the machine with the GPU, in front of SGLang.
+
+```sh
+go build -o gateway ./cmd/gateway
+./gateway -upstream http://127.0.0.1:30000 -in-flight 8 -batch-cap 6 \
+          -token "railway:$(openssl rand -hex 24)" -rate 600
+```
+
+SGLang has no auth and unbounded queueing: a burst does not get rejected, it
+grows the queue until everything times out together. The gateway adds bearer
+auth, per-client rate limits, a response cache, and — the important one — hard
+admission control at the measured saturation point.
+
+**Admission priority is a reservation, not preemption.** An in-flight
+generation cannot be cancelled usefully: the work is already spent and the slot
+frees no sooner. So batch traffic is capped at `-batch-cap` of `-in-flight`
+slots, guaranteeing an interactive request never queues behind a full house of
+batch work. Verified in `gateway_test.go` — 60 concurrent batch requests, and
+an interactive one is admitted in 151 ms.
+
+Measured against the real model server: cache hit **4 ms** against a full
+generation, and a 503 carries `Retry-After` so clients back off instead of
+hammering.
+
+See `deploy/RAILWAY.md` for the Tailscale path from Railway.
