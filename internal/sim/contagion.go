@@ -57,6 +57,14 @@ type Contagion struct {
 	// is a property of the model, not of the world.
 	TransmitFor int
 
+	// ThresholdScale multiplies every threshold for the current story. It is
+	// how one contagion differs from another on the same population: sharing a
+	// link is nearly free and needs almost no corroboration, changing how you
+	// vote is expensive and needs a lot. Without it every story on a given
+	// graph either tips or fizzles identically, which says more about the
+	// parameters than about the story.
+	ThresholdScale float64
+
 	// Simple switches to per-contact probabilistic transmission. Present so
 	// the two models can be run on the same graph with the same seeds, which
 	// is the only way to make a claim about the difference between them.
@@ -101,13 +109,14 @@ func DefaultContagionConfig() ContagionConfig {
 // at all is mostly a question of whether the seed lands near enough of them.
 func NewContagion(w *world.World, cfg ContagionConfig) *Contagion {
 	c := &Contagion{
-		State:        make([]uint8, w.N),
-		Threshold:    make([]float32, w.N),
-		AdoptedAt:    make([]int32, w.N),
-		MinReinforce: cfg.MinReinforce,
-		TransmitFor:  cfg.TransmitFor,
-		Seed:         cfg.Seed,
-		next:         make([]uint8, w.N),
+		State:          make([]uint8, w.N),
+		Threshold:      make([]float32, w.N),
+		AdoptedAt:      make([]int32, w.N),
+		MinReinforce:   cfg.MinReinforce,
+		TransmitFor:    cfg.TransmitFor,
+		ThresholdScale: 1,
+		Seed:           cfg.Seed,
+		next:           make([]uint8, w.N),
 	}
 	for i := range c.AdoptedAt {
 		c.AdoptedAt[i] = -1
@@ -135,6 +144,10 @@ func NewContagion(w *world.World, cfg ContagionConfig) *Contagion {
 // would let a cascade travel an unbounded distance in a single tick, at a
 // speed set by memory layout.
 func (c *Contagion) Advance(g *Graph) int {
+	scale := c.ThresholdScale
+	if scale <= 0 {
+		scale = 1
+	}
 	copy(c.next, c.State)
 	counts := make([]int, numWorkers(len(c.State)))
 
@@ -172,7 +185,7 @@ func (c *Contagion) Advance(g *Graph) int {
 				continue
 			}
 
-			need := int(math.Ceil(float64(c.Threshold[i]) * float64(len(nb))))
+			need := int(math.Ceil(float64(c.Threshold[i]) * scale * float64(len(nb))))
 			if need < c.MinReinforce {
 				need = c.MinReinforce
 			}
@@ -247,6 +260,7 @@ func (c *Contagion) Reset() {
 		c.AdoptedAt[i] = -1
 	}
 	c.Step = 0
+	c.ThresholdScale = 1
 }
 
 // SeedScattered picks k adopters uniformly at random across the whole world.

@@ -6,10 +6,10 @@ content and a Go engine doing the per-capita work.
 
 **Plan:** https://claude.ai/code/artifact/cb3b3c4a-f91b-4a80-b24c-f2afbf6f5a7c
 
-## Status — phase 3
+## Status — phase 4
 
-Population, social network, opinion dynamics, and contagion, ticking live
-behind an HTTP API and a WebGL2 globe.
+Grounded personas, a social network over them, opinion dynamics and contagion,
+ticking live behind an HTTP API and a WebGL2 globe.
 
 ```
 go run ./cmd/populace -n 1000000
@@ -73,9 +73,12 @@ web/                WebGL2 renderer, one draw call
 
 - Phase 2: Go gateway on the Spark (auth, admission control at 8 in flight,
   priority lanes) and Tailscale from Railway.
-- Phase 4: LOD ladder down to palette-indexed pixel sprites.
-- The language model in the loop: archetype-level reaction text through the
-  phase-2 gateway, applied per capita by the phase-3 engine.
+- The language model in the loop: `/api/archetypes` is already the generation
+  manifest. Walk it once through the phase-2 gateway, cache forever.
+- LOD ladder down to palette-indexed pixel sprites.
+- Stratum share should vary by region. It currently does not: high-net-worth is
+  3% of Lagos and 3% of Zurich, which understates real inequality. The mix
+  *within* a stratum does shift correctly; the marginal does not.
 
 ## Honest limits
 
@@ -227,3 +230,113 @@ right shape and uncalibrated parameters. What the tests establish is that the
 *mechanisms* behave as the literature says they do; they establish nothing
 about the magnitudes. Calibration against observed cascades is the work that
 would make a number here quotable.
+
+## Phase 4 — who these people actually are
+
+Until now `Arch[i]` was `rand % 400`: a number with no referent. It is now a
+**role crossed with a region**, and both the sprites and the language model
+need it to be real.
+
+### 45 roles x 10 regions = 450 archetypes
+
+An archetype is the unit the model writes for, and its size is set by a budget,
+not by taste. At the measured 99 tok/s aggregate, 450 archetypes is about ten
+minutes of generation for the entire world, once, cached forever. Adding age
+bands and education would be more faithful and would also mean the model never
+finishes — that trade is the whole reason archetypes exist as a concept rather
+than generating every persona individually.
+
+What varies *within* an archetype stays in Go: position, age, opinion prior,
+adoption threshold, tie count. Two personas of one archetype are not the same
+person; they are people the model would write the same way about.
+
+The taxonomy reaches deliberately from a smallholder farmer to a celebrity
+performer, because a simulation stocked only with the comfortable middle answers
+every question the same way. `GET /api/archetypes` is the manifest, with live
+counts and the exact prompt each cell will be given:
+
+```
+[nomadic]        A pastoral herder in South Asia, who moves livestock along
+                 routes that are being fenced off.
+[immigrant]      A refugee in South Asia, who is waiting on a decision made by
+                 people they will never meet.
+[high_net_worth] A finance professional in Eurasia, who prices other people's
+                 risk and is paid on the outcome.
+```
+
+### Roles are conditioned, not assigned
+
+Region comes from where the persona landed; the role from their stratum,
+weighted by that region's development index and how urban their spot is.
+Exponential in the mismatch rather than filtered, so rare is rare and never
+impossible — the tails are where the interesting personas are.
+
+| | Sub-Saharan Africa | North America |
+|---|---|---|
+| smallholder farmer | 38.2% | 5.9% |
+| software engineer | 0.33% | 5.97% |
+
+Within a stratum the mix shifts the way a *conditional* distribution should:
+given someone is high-net-worth, wealth in a lower-income region is likelier to
+sit in plant and payroll than in a trading book (industrialist 0.69% vs 0.26%;
+finance 0.78% NA vs 0.60% SSA). The first version of that test asserted the
+opposite and the model was right — it is kept because the wrong intuition is
+easy to have twice.
+
+### Two things measurement caught
+
+**Fishers were the third most common job on Earth.** Weighting by region and
+urbanity alone made every rural-biased role roughly equally likely: 12,467
+fishers against 18,113 smallholder farmers. Occupational frequency is mostly a
+fact about the job, not the place, so roles now carry a base prevalence. The
+global mix is now 21.8% smallholder farmer — against ~26% of real global
+employment in agriculture — and fishers are out of the top twelve.
+
+**Every event reported the same opinion shift.** Three stories with different
+stances and difficulties all moved the population about −8pp against and −20pp
+for. None of that was the event: the opinion field started away from
+equilibrium and simply relaxing toward it swamped everything. `Sim.New` and
+`Sim.Reset` now settle the field first, so the "before" state is a population
+already at rest on the topic. Same three stories afterwards:
+
+| story | stance | reach | moved |
+|---|---|---|---|
+| leaked memo, cheap to pass on | −0.9 | 99.9% | +0.40pp against |
+| flood-defence fund | +0.9 | 1.1% | +6.26pp for |
+| merger, low salience | −0.5 | 1.0% | ±0.02pp |
+
+The UI now reports the shift rather than the level, because the level is mostly
+what the population already believed and the story did not cause it.
+
+### Stories differ in what reacting costs
+
+`Event.Difficulty` scales adoption thresholds. Passing on a leaked memo is
+nearly free; changing what you buy is not. Without it every story on a given
+population tips or fizzles together, which reports a property of the parameters
+rather than of the news. Same world, same 1% regional seed:
+
+```
+low-cost reaction  (x0.6):  99.94% adopt
+high-cost reaction (x2.0):   1.21% adopt
+```
+
+### Places have names
+
+186 named centres with regions. An event now breaks *in Pune* rather than at
+spatial rank 4,712,883 — and the region is what makes the archetype plausible
+rather than generic.
+
+### Measured
+
+Generation slowed 3.3x when role selection added twenty-five exponentials per
+persona. Precomputing a cumulative weight table per (stratum, region, urbanity
+bucket) turned that into one lookup:
+
+| | 1M | 10M |
+|---|---|---|
+| population + archetypes | 164 ms | 1.42 s |
+| social graph + settle | 310 ms | 4.28 s |
+| one tick | 23 ms | 236 ms |
+| heap | 0.15 GB | 1.47 GB |
+
+21 tests across `internal/world` and `internal/sim`, clean under `-race`.

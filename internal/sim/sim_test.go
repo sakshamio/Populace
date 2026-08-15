@@ -326,20 +326,34 @@ func TestDeltaCarriesOnlyChanges(t *testing.T) {
 		"against %d for a full resend", n, w.N, 12+6*n, w.N*2)
 }
 
-// The delta is only cheaper while the change set is small, and during an
-// active event it is not: the opinion field moves for nearly everyone at once.
+// The delta is only cheaper while the change set is small, and a story that
+// tips is not small: adoption state changes for nearly the whole population.
 // The encoder must notice and switch, or the "optimisation" costs three times
 // what it saves.
+//
+// The worst case is constructed explicitly rather than assumed. An earlier
+// version of this test just ran one tick, which dirtied ~95% only because the
+// opinion field had not settled yet -- once Sim.New settles it, an ordinary
+// tick moves far fewer people and a delta is genuinely the right choice. The
+// test was measuring a startup transient, not the case it claims to cover.
 func TestFullFrameWinsWhenNearlyEverythingMoves(t *testing.T) {
 	w := testWorld(t, 20_000)
 	s := New(w, DefaultConfig())
-	s.Inject(Event{Stance: -1, Salience: 1, Seeding: SeedInRegion, SeedSize: 200, Seed: 3})
 
 	var buf bytes.Buffer
-	s.Encode(&buf) // drain the injection
+	s.Encode(&buf) // establish a clean baseline
 
-	s.Advance() // one round of opinion movement touches almost everyone
+	// A cheap-to-act-on story seeded in a place: this is the regime that tips.
+	s.Inject(Event{Stance: -1, Salience: 1, Seeding: SeedInRegion,
+		SeedSize: w.N / 100, Seed: 3, Difficulty: 0.6})
+	for i := 0; i < 12; i++ {
+		s.Advance()
+	}
 	dirty := s.DirtyCount()
+	if dirty < w.N/3 {
+		t.Fatalf("only %d of %d changed; the cascade did not tip and this test "+
+			"is not exercising the case it exists for", dirty, w.N)
+	}
 	buf.Reset()
 	n, full, err := s.Encode(&buf)
 	if err != nil {
@@ -353,7 +367,7 @@ func TestFullFrameWinsWhenNearlyEverythingMoves(t *testing.T) {
 		t.Fatalf("full frame is %d bytes for %d records, want %d for %d",
 			buf.Len(), n, 12+2*w.N, w.N)
 	}
-	t.Logf("one tick dirtied %d of %d (%.0f%%): full frame %d bytes, "+
+	t.Logf("a story that tipped dirtied %d of %d (%.0f%%): full frame %d bytes, "+
 		"a delta would have been %d", dirty, w.N,
 		float64(dirty)/float64(w.N)*100, buf.Len(), 12+6*dirty)
 }
@@ -405,39 +419,6 @@ func BenchmarkTick(b *testing.B) {
 	}
 }
 
-// Seeding a story through broadcasters reaches a lot of people once, and a
-// complex contagion ignores being reached once. This is the mechanism behind
-// "the campaign got great coverage and changed nobody's behaviour", and it
-// falls out of the model rather than being assumed by it.
-func TestBroadcastSeedingIsWideButShallow(t *testing.T) {
-	w := testWorld(t, testN)
-	g := testGraph(t, w)
-	cfg := DefaultContagionConfig()
-
-	// Find the biggest broadcaster and seed outward from it.
-	star, bestDeg := int32(0), -1
-	for i := 0; i < w.N; i++ {
-		if world.Stratum(w.Strat[i]) == world.Media && g.Degree(i) > bestDeg {
-			star, bestDeg = int32(i), g.Degree(i)
-		}
-	}
-	viaStar := NewContagion(w, cfg)
-	viaStar.SeedCluster(g, star, 400)
-	viaStar.Run(g, 200)
-
-	s := New(w, DefaultConfig())
-	s.Inject(Event{Stance: -0.8, Salience: 0.7, Seeding: SeedInNetwork, SeedSize: 400, Seed: 42})
-	s.C.Run(g, 200)
-
-	if s.C.Count() <= viaStar.Count() {
-		t.Fatalf("community seeding (%d) did not beat broadcaster seeding (%d)",
-			s.C.Count(), viaStar.Count())
-	}
-	t.Logf("400 seeds, complex contagion:")
-	t.Logf("  outward from a broadcaster (degree %d): %6d adopters", bestDeg, viaStar.Count())
-	t.Logf("  outward from a dense community:         %6d adopters", s.C.Count())
-}
-
 // The three seeding strategies, same population, same graph, same budget.
 //
 // The assertion here is deliberately narrower than the one first written,
@@ -481,22 +462,24 @@ func TestSeedingInAPlaceCreatesReinforcement(t *testing.T) {
 		return float64(internal) / float64(total), withReinforcement
 	}
 
-	seed := func(mode Seeding) []int32 {
-		c := NewContagion(w, cfg.Contagion)
-		switch mode {
-		case SeedInRegion:
-			r := newRNG(2026^0x9111, 1)
-			return c.SeedRegion(s.G, int32(r.u32()%uint32(w.N)), budget)
-		case SeedInNetwork:
-			return c.SeedCluster(s.G, s.denseStart(2026), budget)
-		default:
-			return c.SeedScattered(budget, 2026)
+	// The fourth case is not a Seeding mode and is the most instructive:
+	// growing the seed set outward from the biggest broadcaster. It is what a
+	// campaign buys when it buys coverage.
+	star, bestDeg := int32(0), -1
+	for i := 0; i < w.N; i++ {
+		if world.Stratum(w.Strat[i]) == world.Media && s.G.Degree(i) > bestDeg {
+			star, bestDeg = int32(i), s.G.Degree(i)
 		}
 	}
 
-	rShare, rReady := density(seed(SeedInRegion))
-	nShare, nReady := density(seed(SeedInNetwork))
-	eShare, eReady := density(seed(SeedEverywhere))
+	fresh := func() *Contagion { return NewContagion(w, cfg.Contagion) }
+	rShare, rReady := density(func() []int32 {
+		r := newRNG(2026^0x9111, 1)
+		return fresh().SeedRegion(s.G, int32(r.u32()%uint32(w.N)), budget)
+	}())
+	nShare, nReady := density(fresh().SeedCluster(s.G, s.denseStart(2026), budget))
+	bShare, bReady := density(fresh().SeedCluster(s.G, star, budget))
+	eShare, eReady := density(fresh().SeedScattered(budget, 2026))
 
 	if rShare <= nShare || nShare <= eShare {
 		t.Fatalf("internal tie share should fall region > network > scattered, got %.3f / %.3f / %.3f",
@@ -505,11 +488,19 @@ func TestSeedingInAPlaceCreatesReinforcement(t *testing.T) {
 	if rReady < budget/2 {
 		t.Fatalf("only %d of %d regional seeds start with reinforcement", rReady, budget)
 	}
+	// Coverage is not adoption: a broadcaster's audience is a star, so almost
+	// none of it starts with the second exposure the threshold rule needs.
+	if bReady >= rReady {
+		t.Fatalf("broadcaster seeding gave %d reinforced seeds against %d for a region; "+
+			"it should be closer to a star than to a cluster", bReady, rReady)
+	}
 	t.Logf("%d seeds: share of ties that stay inside the seed set, and how many "+
 		"seeds begin with the two exposures the threshold rule needs", budget)
-	t.Logf("  one region (a place):      %5.1f%%   %3d seeds", rShare*100, rReady)
-	t.Logf("  one network neighbourhood: %5.1f%%   %3d seeds", nShare*100, nReady)
-	t.Logf("  scattered worldwide:       %5.1f%%   %3d seeds", eShare*100, eReady)
+	t.Logf("  one region (a place):       %5.1f%%   %3d seeds", rShare*100, rReady)
+	t.Logf("  one network neighbourhood:  %5.1f%%   %3d seeds", nShare*100, nReady)
+	t.Logf("  outward from a broadcaster: %5.1f%%   %3d seeds  (degree %d)",
+		bShare*100, bReady, bestDeg)
+	t.Logf("  scattered worldwide:        %5.1f%%   %3d seeds", eShare*100, eReady)
 }
 
 // The validation that matters most, and the one that says the dynamics are a
@@ -547,4 +538,35 @@ func TestReachDependsOnSeededFractionNotCount(t *testing.T) {
 		t.Logf("seed %.1f%%  ->  60k: %.3f%% adopt   1M: %.3f%% adopt   "+
 			"(amplification %.2fx)", f*100, small*100, large*100, large/f)
 	}
+}
+
+// Two stories, same world, same graph, same seed set, same size. The only
+// difference is how much the reaction costs the person doing it.
+//
+// Without this knob every story on a given population either tips or fizzles
+// together, which reports a property of the parameters rather than of the news.
+func TestDifficultySeparatesStoriesThatTipFromThoseThatDont(t *testing.T) {
+	w := testWorld(t, testN)
+	cfg := DefaultConfig()
+
+	reach := func(difficulty float64) float64 {
+		s := New(w, cfg)
+		s.Inject(Event{Stance: -0.7, Salience: 0.6, Seeding: SeedInRegion,
+			SeedSize: testN / 100, Seed: 11, Difficulty: difficulty})
+		s.C.Run(s.G, 400)
+		return float64(s.C.Count()) / float64(w.N)
+	}
+
+	easy := reach(0.6) // passing on a link
+	hard := reach(2.0) // changing what you actually do
+
+	if easy < 0.5 {
+		t.Fatalf("a low-cost reaction only reached %.1f%%; nothing tips", easy*100)
+	}
+	if hard > 0.1 {
+		t.Fatalf("a high-cost reaction reached %.1f%%; the threshold is not binding", hard*100)
+	}
+	t.Logf("same 1%% seed in the same place, %d people:", testN)
+	t.Logf("  low-cost reaction  (x0.6): %6.2f%% adopt", easy*100)
+	t.Logf("  high-cost reaction (x2.0): %6.2f%% adopt", hard*100)
 }

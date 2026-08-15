@@ -119,7 +119,11 @@ func BuildGraph(w *world.World, cfg GraphConfig) *Graph {
 	parallel(n, func(lo, hi int) {
 		for i := lo; i < hi; i++ {
 			r := newRNG(cfg.Seed^0xD1B54A32D192ED03, uint64(i))
-			k := math.Exp(mu+cfg.SigmaLog*r.norm()) * cfg.Broadcast[w.Strat[i]]
+			// Stratum sets the scale, role varies within it: a celebrity
+			// performer and a documentary producer are both broadcasters and
+			// are not the same size of broadcaster.
+			k := math.Exp(mu+cfg.SigmaLog*r.norm()) *
+				cfg.Broadcast[w.Strat[i]] * world.Archetype(w.Arch[i]).Reach()
 			ki := int(k + 0.5)
 			if ki < 1 {
 				ki = 1

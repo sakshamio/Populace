@@ -32,6 +32,14 @@ type Sim struct {
 	dirty   []int32
 	inDirty []bool
 	lastFl  []uint16
+
+	// Opinion level at the moment the current story broke. Reported as a shift
+	// because the level is mostly the population's stubborn priors, which the
+	// story did not cause -- quoting it would credit every event with the
+	// entire prior distribution of the topic.
+	baseOpinion float64
+	baseNeg     float64
+	basePos     float64
 }
 
 type Config struct {
@@ -57,8 +65,22 @@ func New(w *world.World, cfg Config) *Sim {
 		inDirty: make([]bool, w.N),
 		lastFl:  make([]uint16, w.N),
 	}
+	s.settle()
 	s.packAll()
 	return s
+}
+
+// settle runs the opinion field to its fixed point before anything happens.
+//
+// Without this the population starts away from equilibrium and simply relaxing
+// toward it moves every aggregate, in the same direction, by more than any
+// story does. Measured before this was added: three events with different
+// stances and difficulties all reported roughly -8pp against and -20pp for,
+// because none of that was the event -- it was the field converging. A
+// "before" state has to be a population already at rest on the topic, or the
+// shift is not attributable to anything.
+func (s *Sim) settle() {
+	s.O.Settle(s.G, 300, 1e-5)
 }
 
 // Event is a piece of news entering the world.
@@ -77,6 +99,12 @@ type Event struct {
 	Seeding  Seeding
 	SeedSize int
 	Seed     uint64
+
+	// Difficulty scales adoption thresholds for this story: below 1 for
+	// things people pass on without thinking, above 1 for things that cost
+	// them something to act on. 1 leaves the population's own thresholds
+	// untouched.
+	Difficulty float64
 }
 
 // Seeding is where a story starts.
@@ -114,6 +142,10 @@ func (s *Sim) Inject(ev Event) []int32 {
 	}
 	s.O.Broadcast(carriers, ev.Stance)
 
+	if ev.Difficulty > 0 {
+		s.C.ThresholdScale = ev.Difficulty
+	}
+
 	size := ev.SeedSize
 	if size <= 0 {
 		size = 64
@@ -135,6 +167,8 @@ func (s *Sim) Inject(ev Event) []int32 {
 		r := newRNG(ev.Seed^0x9111, 1)
 		seeded = s.C.SeedRegion(s.G, int32(r.u32()%uint32(s.W.N)), size)
 	}
+	s.baseOpinion = s.O.Mean(s.W)
+	s.baseNeg, s.basePos = s.O.Polarisation(s.W, 0.35)
 	s.resync()
 	return seeded
 }
@@ -315,16 +349,23 @@ func (s *Sim) DirtyCount() int { return len(s.dirty) }
 // Snapshot is the set of numbers a UI or a report should quote. Every share
 // here is population-weighted.
 type Snapshot struct {
-	Tick        int         `json:"tick"`
-	N           int         `json:"n"`
-	Edges       int64       `json:"edges"`
-	Reach       float64     `json:"reach"`
-	Adopters    int         `json:"adopters"`
-	MeanOpinion float64     `json:"mean_opinion"`
-	Variance    float64     `json:"opinion_variance"`
-	NegShare    float64     `json:"share_against"`
-	PosShare    float64     `json:"share_for"`
-	Degree      DegreeStats `json:"degree"`
+	Tick        int     `json:"tick"`
+	N           int     `json:"n"`
+	Edges       int64   `json:"edges"`
+	Reach       float64 `json:"reach"`
+	Adopters    int     `json:"adopters"`
+	MeanOpinion float64 `json:"mean_opinion"`
+
+	// Shift is what this story did, as opposed to what the population already
+	// thought. It is the number a report should quote.
+	OpinionShift float64 `json:"opinion_shift"`
+	NegShift     float64 `json:"share_against_shift"`
+	PosShift     float64 `json:"share_for_shift"`
+
+	Variance float64     `json:"opinion_variance"`
+	NegShare float64     `json:"share_against"`
+	PosShare float64     `json:"share_for"`
+	Degree   DegreeStats `json:"degree"`
 }
 
 func (s *Sim) Snapshot(withDegree bool) Snapshot {
@@ -339,6 +380,10 @@ func (s *Sim) Snapshot(withDegree bool) Snapshot {
 		Variance:    s.O.Variance(s.W),
 		NegShare:    neg,
 		PosShare:    pos,
+
+		OpinionShift: s.O.Mean(s.W) - s.baseOpinion,
+		NegShift:     neg - s.baseNeg,
+		PosShift:     pos - s.basePos,
 	}
 	if withDegree {
 		sn.Degree = s.G.DegreeStats(s.W)
@@ -352,6 +397,8 @@ func (s *Sim) Snapshot(withDegree bool) Snapshot {
 func (s *Sim) Reset(cfg Config) {
 	s.C.Reset()
 	s.O = NewOpinion(s.W, cfg.TopicSeed)
+	s.settle()
 	s.Tick = 0
+	s.baseOpinion, s.baseNeg, s.basePos = 0, 0, 0
 	s.resync()
 }

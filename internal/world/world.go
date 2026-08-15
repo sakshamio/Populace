@@ -85,11 +85,15 @@ type World struct {
 	// Immutable after generation. Uploaded to the GPU once and never moved
 	// again, which is why they are separated from the mutable state below.
 	Lon, Lat []float32
-	Arch     []uint16 // archetype id
+	Arch     []uint16 // archetype id: see Archetype
 	Palette  []uint16 // row in the palette texture
 	Shape    []uint16 // index into the sprite atlas
 	Strat    []uint8
 	Weight   []float32
+
+	// Server-side only; never reaches the GPU record.
+	Place    []uint16  // index into the centre table -- where this person lives
+	Urbanity []float32 // 1 at the core of a centre, falling off with distance
 
 	// Mutable per tick. This is the only buffer that goes back to the client
 	// after the first snapshot, as run-length-encoded deltas.
@@ -105,16 +109,18 @@ type World struct {
 // world.
 func Generate(n int, seed uint64) *World {
 	w := &World{
-		N:       n,
-		Seed:    seed,
-		Lon:     make([]float32, n),
-		Lat:     make([]float32, n),
-		Arch:    make([]uint16, n),
-		Palette: make([]uint16, n),
-		Shape:   make([]uint16, n),
-		Strat:   make([]uint8, n),
-		Weight:  make([]float32, n),
-		Flags:   make([]uint16, n),
+		N:        n,
+		Seed:     seed,
+		Lon:      make([]float32, n),
+		Lat:      make([]float32, n),
+		Arch:     make([]uint16, n),
+		Palette:  make([]uint16, n),
+		Shape:    make([]uint16, n),
+		Strat:    make([]uint8, n),
+		Weight:   make([]float32, n),
+		Flags:    make([]uint16, n),
+		Place:    make([]uint16, n),
+		Urbanity: make([]float32, n),
 	}
 
 	// Cumulative stratum distribution, computed once.
@@ -139,17 +145,29 @@ func Generate(n int, seed uint64) *World {
 		w.Strat[i] = uint8(st)
 		w.Weight[i] = st.Weight()
 
-		lon, lat := samplePosition(&r, st)
+		lon, lat, place, urbanity := samplePosition(&r, st)
 		w.Lon[i] = float32(lon * math.Pi / 180)
 		w.Lat[i] = float32(lat * math.Pi / 180)
+		w.Place[i] = place
+		w.Urbanity[i] = urbanity
 
-		// Placeholder derivations. The real archetype is a cell in
-		// region x age x education x occupation x media diet x values, and
-		// the palette is derived from it so that a sprite encodes who
-		// someone is rather than decorating them.
-		w.Arch[i] = uint16(r.u32() % 400)
-		w.Palette[i] = uint16(r.u32() % 1024)
-		w.Shape[i] = uint16(r.u32() % 8)
+		// Archetype is derived, not drawn: region comes from where the person
+		// landed, and the role from their stratum weighted by that region's
+		// development index and how urban their spot is. So a herder is common
+		// in the Sahel and vanishingly rare in Zurich without either being
+		// forbidden -- which is the point, because the rare cells are where the
+		// interesting personas live.
+		reg := centres[place].region
+		role := pickRole(&r, st, reg, float64(urbanity))
+		arch := MakeArchetype(reg, role)
+		w.Arch[i] = uint16(arch)
+
+		// Palette and sprite are functions of the archetype so that what a dot
+		// looks like encodes who it is. Derived rather than drawn: two personas
+		// of the same archetype must be indistinguishable on screen, or the
+		// globe shows noise where it should show structure.
+		w.Palette[i] = uint16(arch) % 1024
+		w.Shape[i] = uint16(role % 8)
 	}
 	return w
 }

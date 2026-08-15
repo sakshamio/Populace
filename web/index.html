@@ -54,7 +54,7 @@
 <body>
 <header>
   <h1>Populace</h1>
-  <span class="sub" id="hdr">phase 3 — social graph, opinion dynamics, complex contagion</span>
+  <span class="sub" id="hdr">phase 4 — grounded archetypes, live on a real globe</span>
 </header>
 
 <main>
@@ -67,7 +67,9 @@
       <span>tick <b id="s-tick">0</b></span>
       <span>reach <b id="s-reach">0.00%</b></span>
       <span>split <b id="s-split">—</b></span>
+      <span>moved <b id="s-shift">—</b></span>
       <span>ties <b id="s-edges">—</b></span>
+      <span>archetypes <b id="s-arch">—</b></span>
       <span>load <b id="s-load">—</b></span>
     </div>
     <div class="controls">
@@ -159,21 +161,32 @@ async function pollStats() {
   try {
     const res = await fetch('/api/stats', { cache: 'no-store' });
     if (!res.ok) return;
-    const { snapshot: s, running } = await res.json();
+    const { snapshot: s, running, archetypes } = await res.json();
     $('s-reach').textContent = pct(s.reach);
     $('s-split').textContent =
       `${pct(s.share_against)} / ${pct(s.share_for)}`;
+    // The shift, not the level: the level is mostly what the population
+    // already believed, which this story did not cause.
+    const sh = (v) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 'pp';
+    $('s-shift').textContent = `${sh(s.share_against_shift)} against`;
     $('s-edges').textContent = s.edges.toLocaleString();
+    $('s-arch').textContent = archetypes;
     $('pause').textContent = running ? 'Pause' : 'Resume';
   } catch (e) { /* same */ }
 }
 
+// [headline, stance, difficulty]. Difficulty is how much the reaction costs
+// the person having it: passing on a leaked memo is nearly free, changing what
+// you buy or how you vote is not. Without that third number every story on a
+// given population tips or fizzles together, which would say more about the
+// parameters than about the news.
 const HEADLINES = [
-  ['Regulator opens inquiry into the largest carrier', -0.8],
-  ['Central bank holds rates for a fourth quarter', -0.2],
-  ['Coastal cities agree a joint flood-defence fund', 0.6],
-  ['Leaked memo contradicts the official account', -0.9],
-  ['Trial results published for the new treatment', 0.8],
+  ['Regulator opens inquiry into the largest carrier', -0.8, 1.4],
+  ['Central bank holds rates for a fourth quarter',    -0.2, 2.2],
+  ['Coastal cities agree a joint flood-defence fund',   0.6, 1.8],
+  ['Leaked memo contradicts the official account',     -0.9, 0.6],
+  ['Trial results published for the new treatment',     0.8, 1.1],
+  ['Two carriers announce a merger',                   -0.5, 2.6],
 ];
 
 async function post(url, body) {
@@ -196,8 +209,8 @@ $('pause').addEventListener('click', async () => {
   pollStats();
 });
 $('fire').addEventListener('click', async () => {
-  const [headline, stance] = HEADLINES[(Math.random() * HEADLINES.length) | 0];
-  $('hdr').textContent = headline;
+  const [headline, stance, difficulty] = HEADLINES[(Math.random() * HEADLINES.length) | 0];
+  $('hdr').textContent = headline + ' — breaking…';
   // Seeded in a region rather than scattered worldwide: a complex contagion
   // started by scattering the same number of seeds does not start at all --
   // nobody gets the second exposure the threshold rule requires.
@@ -207,7 +220,8 @@ $('fire').addEventListener('click', async () => {
   // thousand and at one million alike. A fixed 300 people would be a story at
   // small scale and a rounding error at large.
   const seed_size = Math.max(400, Math.round(globe.n / 100));
-  await post('/api/event', { headline, stance, salience: 0.7, seeding: 'region', seed_size });
+  const r = await post('/api/event', { headline, stance, salience: 0.7, seeding: 'region', seed_size, difficulty });
+  if (r) $('hdr').textContent = `${headline} — breaking in ${r.where}`;
   pollStats();
 });
 

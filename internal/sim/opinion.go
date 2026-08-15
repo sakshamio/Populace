@@ -37,6 +37,13 @@ type Opinion struct {
 // near-immovable broadcasters, because an outlet's published position does not
 // drift toward its readers within the horizon of a simulated week.
 func NewOpinion(w *world.World, topicSeed uint64) *Opinion {
+	// Each topic is a random direction in the (openness, security) plane, so
+	// different topics divide the population along different seams. A single
+	// fixed axis would make every story split the world the same way.
+	ax := newRNG(topicSeed, 0xA5A5)
+	theta := ax.f64() * 2 * math.Pi
+	axisA, axisB := math.Cos(theta), math.Sin(theta)
+
 	o := &Opinion{
 		Y:      make([]float32, w.N),
 		Prior:  make([]float32, w.N),
@@ -47,12 +54,19 @@ func NewOpinion(w *world.World, topicSeed uint64) *Opinion {
 		for i := lo; i < hi; i++ {
 			r := newRNG(topicSeed, uint64(i))
 
-			// Prior correlates with archetype: people in the same cell of the
-			// demographic space start closer together than chance. Without
-			// this the graph's homophily has nothing to be homophilous about.
-			ar := newRNG(topicSeed^0xA5A5, uint64(w.Arch[i]))
-			base := 2*ar.f64() - 1
-			s := clampF(base*0.7+r.norm()*0.35, -1, 1)
+			// The prior is a projection of the archetype's values onto the
+			// topic, not a random number keyed by archetype.
+			//
+			// That distinction is load-bearing. With a random per-archetype
+			// base, two archetypes that agree on one topic are no more likely
+			// to agree on the next, so the graph's homophily connects people
+			// who have nothing in common and the clustering means nothing.
+			// Projecting a shared value space makes agreement transitive
+			// across topics, which is the property that makes a simulated
+			// population feel like one rather than like noise with labels.
+			open, sec := world.Archetype(w.Arch[i]).Values()
+			base := axisA*open + axisB*sec
+			s := clampF(base*0.8+r.norm()*0.3, -1, 1)
 			o.Prior[i] = float32(s)
 			o.Y[i] = float32(s)
 

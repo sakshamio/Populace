@@ -25,12 +25,13 @@ import (
 )
 
 type server struct {
-	mu      sync.Mutex
-	w       *world.World
-	s       *sim.Sim
-	cfg     sim.Config
-	running bool
-	lastEv  string
+	mu        sync.Mutex
+	w         *world.World
+	s         *sim.Sim
+	cfg       sim.Config
+	running   bool
+	lastEv    string
+	lastWhere string
 }
 
 func main() {
@@ -77,6 +78,7 @@ func main() {
 	mux.HandleFunc("/api/event", srv.event)
 	mux.HandleFunc("/api/stats", srv.stats)
 	mux.HandleFunc("/api/control", srv.control)
+	mux.HandleFunc("/api/archetypes", srv.archetypes)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(rw, "ok")
 	})
@@ -148,12 +150,13 @@ func (srv *server) state(rw http.ResponseWriter, r *http.Request) {
 }
 
 type eventReq struct {
-	Headline string  `json:"headline"`
-	Stance   float64 `json:"stance"`
-	Salience float64 `json:"salience"`
-	Seeding  string  `json:"seeding"` // region | network | scattered
-	SeedSize int     `json:"seed_size"`
-	Seed     uint64  `json:"seed"`
+	Headline   string  `json:"headline"`
+	Stance     float64 `json:"stance"`
+	Salience   float64 `json:"salience"`
+	Seeding    string  `json:"seeding"` // region | network | scattered
+	SeedSize   int     `json:"seed_size"`
+	Seed       uint64  `json:"seed"`
+	Difficulty float64 `json:"difficulty"` // <1 cheap to act on, >1 costly
 }
 
 func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
@@ -180,30 +183,39 @@ func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
 	seeded := srv.s.Inject(sim.Event{
 		Headline: req.Headline, Stance: float32(clamp1(req.Stance)),
 		Salience: req.Salience, Seeding: seedingOf(req.Seeding),
-		SeedSize: req.SeedSize, Seed: req.Seed,
+		SeedSize: req.SeedSize, Seed: req.Seed, Difficulty: req.Difficulty,
 	})
+	// Where it broke, taken from the seed set rather than chosen separately --
+	// two sources for the same fact is two chances to disagree about it.
+	where := "nowhere"
+	if len(seeded) > 0 {
+		where = srv.w.PlaceName(int(seeded[0]))
+	}
 	srv.lastEv = req.Headline
+	srv.lastWhere = where
 	snap := srv.s.Snapshot(false)
 	srv.mu.Unlock()
 
-	log.Printf("event %q stance %+.2f salience %.2f: seeded %d (%s)",
-		req.Headline, req.Stance, req.Salience, len(seeded), req.Seeding)
+	log.Printf("event %q stance %+.2f salience %.2f: seeded %d in %s (%s)",
+		req.Headline, req.Stance, req.Salience, len(seeded), where, req.Seeding)
 
 	rw.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(rw).Encode(map[string]any{"seeded": len(seeded), "snapshot": snap})
+	json.NewEncoder(rw).Encode(map[string]any{
+		"seeded": len(seeded), "where": where, "snapshot": snap})
 }
 
 func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 	srv.mu.Lock()
 	snap := srv.s.Snapshot(r.URL.Query().Get("degree") == "1")
-	running, last := srv.running, srv.lastEv
+	running, last, where := srv.running, srv.lastEv, srv.lastWhere
 	srv.mu.Unlock()
 
 	rw.Header().Set("Content-Type", "application/json")
 	rw.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(rw).Encode(map[string]any{
-		"snapshot": snap, "running": running, "headline": last,
+		"snapshot": snap, "running": running, "headline": last, "where": where,
 		"instance_bytes": world.InstanceBytes,
+		"archetypes":     world.NumArchetypes(),
 	})
 }
 
@@ -229,6 +241,41 @@ func (srv *server) control(rw http.ResponseWriter, r *http.Request) {
 
 	rw.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(rw, `{"running":%v}`, running)
+}
+
+// archetypes is the generation manifest: exactly the list a batch job would
+// walk to fill the reaction cache, with live counts so it is obvious which
+// cells actually carry population and which are theoretical.
+func (srv *server) archetypes(rw http.ResponseWriter, r *http.Request) {
+	counts := make([]int, world.NumArchetypes())
+	srv.mu.Lock()
+	for i := 0; i < srv.w.N; i++ {
+		if a := int(srv.w.Arch[i]); a < len(counts) {
+			counts[a]++
+		}
+	}
+	srv.mu.Unlock()
+
+	type row struct {
+		ID      int     `json:"id"`
+		Role    string  `json:"role"`
+		Region  string  `json:"region"`
+		Stratum string  `json:"stratum"`
+		Prompt  string  `json:"prompt"`
+		Count   int     `json:"count"`
+		Reach   float64 `json:"reach"`
+	}
+	out := make([]row, 0, len(counts))
+	for i := range counts {
+		a := world.Archetype(i)
+		out = append(out, row{
+			ID: i, Role: a.Role().Name, Region: world.Regions[a.Region()].Name,
+			Stratum: world.Strata[a.Role().Stratum].Name,
+			Prompt:  a.Describe(), Count: counts[i], Reach: a.Reach(),
+		})
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]any{"n": len(out), "archetypes": out})
 }
 
 // seedingOf defaults to a region, because that is both the realistic case and
