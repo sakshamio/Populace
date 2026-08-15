@@ -1,0 +1,5 @@
+/populace
+/bin/
+*.test
+.env
+node_modules/

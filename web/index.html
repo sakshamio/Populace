@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Populace</title>
+<style>
+  :root{
+    --void:#0B0E14; --ink:#E6E9EF; --muted:#8992A3; --line:#232A38;
+    --accent:#3B5DC9; --warn:#D9773C;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--void);color:var(--ink);font-family:var(--mono);
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  header{
+    display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
+    padding:12px 16px;border-bottom:2px solid var(--line);
+  }
+  h1{font-size:14px;letter-spacing:.18em;text-transform:uppercase;margin:0}
+  .sub{font-size:11px;color:var(--muted);letter-spacing:.06em}
+  main{flex:1;position:relative;min-height:0}
+  canvas{display:block;width:100%;height:100%}
+  .bar{
+    position:absolute;left:0;right:0;bottom:0;display:flex;gap:16px;
+    flex-wrap:wrap;align-items:center;justify-content:space-between;
+    padding:10px 16px;background:rgba(11,14,20,.85);border-top:2px solid var(--line);
+  }
+  .stats{display:flex;gap:18px;flex-wrap:wrap;font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--muted);font-variant-numeric:tabular-nums}
+  .stats b{color:var(--ink)}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button,select{
+    font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    font-weight:700;background:var(--accent);color:#fff;border:2px solid var(--accent);
+    padding:6px 12px;cursor:pointer;
+  }
+  select{background:var(--void);color:var(--ink);border-color:var(--line)}
+  button:hover{background:var(--ink);color:var(--void);border-color:var(--ink)}
+  button:focus-visible,select:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
+  .key{display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px;color:var(--muted);
+    letter-spacing:.06em;text-transform:uppercase}
+  .sw{display:inline-block;width:9px;height:9px;margin-right:5px;vertical-align:-1px}
+  #err{
+    position:absolute;inset:auto 16px 64px 16px;padding:12px 14px;
+    border:2px solid var(--warn);background:#33251A;font-size:12px;
+    line-height:1.5;display:none;text-transform:none;letter-spacing:0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Populace</h1>
+  <span class="sub" id="hdr">phase 1 — placement and render at scale</span>
+</header>
+
+<main>
+  <canvas id="gl" aria-label="Rotating globe showing the simulated population"></canvas>
+  <div id="err" role="alert"></div>
+  <div class="bar">
+    <div class="stats">
+      <span>pop <b id="s-pop">—</b></span>
+      <span>fps <b id="s-fps">—</b></span>
+      <span>aware <b id="s-aware">0.0%</b></span>
+      <span>draw calls <b>1</b></span>
+      <span>load <b id="s-load">—</b></span>
+    </div>
+    <div class="controls">
+      <label class="sub" for="n">size</label>
+      <select id="n">
+        <option value="250000">250k</option>
+        <option value="1000000" selected>1M</option>
+        <option value="4000000">4M</option>
+        <option value="10000000">10M</option>
+      </select>
+      <button id="reload" type="button">Load</button>
+      <button id="fire" type="button">Break a story</button>
+    </div>
+  </div>
+</main>
+
+<div class="bar" style="position:static;border-top:0;border-bottom:2px solid var(--line);background:transparent">
+  <div class="key">
+    <span><i class="sw" style="background:#4A5568"></i>unaware</span>
+    <span><i class="sw" style="background:#3B5DC9"></i>reacts positively</span>
+    <span><i class="sw" style="background:#D9773C"></i>reacts negatively</span>
+    <span>1 persona ≈ 800 people — weighted sample, not a headcount</span>
+  </div>
+</div>
+
+<script type="module">
+import { Globe } from './globe.js';
+
+const $ = (id) => document.getElementById(id);
+const err = $('err');
+function fail(e) {
+  err.style.display = 'block';
+  err.textContent = String(e && e.message ? e.message : e);
+  console.error(e);
+}
+
+let globe;
+try {
+  globe = new Globe($('gl'), ({ n, fps, aware }) => {
+    $('s-pop').textContent = n.toLocaleString();
+    $('s-fps').textContent = fps;
+    $('s-aware').textContent = (n ? (aware / n * 100) : 0).toFixed(1) + '%';
+  });
+  globe.start();
+} catch (e) {
+  fail(e);
+}
+
+async function load() {
+  const n = $('n').value;
+  $('s-load').textContent = 'fetching…';
+  const t0 = performance.now();
+  try {
+    const res = await fetch(`/api/instances?n=${n}`);
+    if (!res.ok) throw new Error(`server returned ${res.status} ${res.statusText}`);
+    const buf = await res.arrayBuffer();
+    const fetched = performance.now();
+    globe.load(buf);
+    const done = performance.now();
+    $('s-load').textContent =
+      `${(buf.byteLength / 1e6).toFixed(1)} MB · ${Math.round(fetched - t0)} ms net · ${Math.round(done - fetched)} ms upload`;
+    err.style.display = 'none';
+  } catch (e) {
+    $('s-load').textContent = 'failed';
+    fail(e);
+  }
+}
+
+$('reload').addEventListener('click', load);
+$('fire').addEventListener('click', () => globe && globe.breakStory());
+load();
+</script>
+</body>
+</html>
