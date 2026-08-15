@@ -6,18 +6,20 @@ content and a Go engine doing the per-capita work.
 
 **Plan:** https://claude.ai/code/artifact/cb3b3c4a-f91b-4a80-b24c-f2afbf6f5a7c
 
-## Status — phase 1
+## Status — phase 3
 
-Placement and render at scale. Deliberately no ticks, no dynamics, no LLM: if
-a Go process cannot hand ten million personas to a WebGL2 renderer as packed
-binary at 60fps, the rest of the design changes, so that gets proven first.
+Population, social network, opinion dynamics, and contagion, ticking live
+behind an HTTP API and a WebGL2 globe.
 
 ```
 go run ./cmd/populace -n 1000000
 open http://localhost:8080
 ```
 
-Flags: `-n` personas, `-seed` world seed, `-addr` listen address, `-web` asset dir.
+Flags: `-n` personas, `-seed` world seed, `-tick` ms between ticks, `-run`
+start ticking immediately, `-addr`, `-web`.
+
+`go run ./cmd/simbench` reproduces every performance number quoted below.
 
 ## The three decisions that shape everything
 
@@ -51,10 +53,19 @@ over personas is not an estimate of anything.
 ## Layout
 
 ```
-cmd/populace/       HTTP server: static assets + binary instance endpoint
+cmd/populace/       HTTP server: assets, instances, state frames, events
+cmd/gateway/        model-server front door (auth, admission control, cache)
+cmd/simbench/       reproduces the performance numbers in this README
 internal/world/     SoA population, stratified sampling, packing
   world.go          World, strata, weights, encoder
   place.go          weighted population centres (stands in for a GHS-POP raster)
+internal/sim/       the dynamics
+  graph.go          CSR social network, spatial order, degree tail
+  opinion.go        Friedkin-Johnsen influence
+  contagion.go      threshold adoption, seeding strategies, attention decay
+  sim.go            tick loop, event injection, adaptive state frames
+internal/gateway/   admission control, lanes, response cache, rate limits
+internal/llm/       client used from Railway, over the tailnet
 web/                WebGL2 renderer, one draw call
 ```
 
@@ -62,9 +73,9 @@ web/                WebGL2 renderer, one draw call
 
 - Phase 2: Go gateway on the Spark (auth, admission control at 8 in flight,
   priority lanes) and Tailscale from Railway.
-- Phase 3: CSR social graph, Friedkin-Johnsen opinion updates, complex
-  contagion. Not simple contagion — single-exposure cascades overstate reach.
 - Phase 4: LOD ladder down to palette-indexed pixel sprites.
+- The language model in the loop: archetype-level reaction text through the
+  phase-2 gateway, applied per capita by the phase-3 engine.
 
 ## Honest limits
 
@@ -98,3 +109,121 @@ generation, and a 503 carries `Retry-After` so clients back off instead of
 hammering.
 
 See `deploy/RAILWAY.md` for the Tailscale path from Railway.
+
+
+## Phase 3 — the dynamics
+
+`internal/sim`. Three pieces: a social network, opinions that move along it,
+and behaviour that spreads across it. All deterministic given a seed, because a
+simulation you cannot replay is a simulation whose surprising result you cannot
+investigate.
+
+### Measured, at ten million
+
+| | 1M | 10M |
+|---|---|---|
+| population | 96 ms | 917 ms |
+| social graph + initial state | 231 ms | 2.18 s |
+| one tick (contagion + opinion) | 24 ms | 336 ms |
+| heap, population and network | 0.15 GB | 1.46 GB |
+| ties | 8.3M | 83.2M |
+
+Degree: mean 16.5, p50 13, p90 25, p99 60, max 3490. Media personas average
+310 — they are broadcast nodes, and without that tail nothing crosses a
+continent and every cascade number is a number about the wrong network.
+
+### Friedkin–Johnsen, not DeGroot
+
+Each agent keeps a stubborn prior it never fully abandons:
+
+    y_i(t+1) = λ_i · mean(neighbours) + (1 − λ_i) · s_i
+
+Under DeGroot averaging (λ = 1) any connected population converges to a single
+shared opinion, which is not a property the world has. Measured at equilibrium
+on the same graph: **FJ variance 0.074, DeGroot variance 9.5e-17.** The second
+number is consensus. The stubborn prior is the entire difference.
+
+Media personas enter as near-immovable broadcasters, which is how an event gets
+into the world at all — a story does not change minds directly, it changes what
+broadcasters are saying and the network does the rest.
+
+### Complex contagion, and what it costs to get it wrong
+
+Adoption requires *reinforcement* — several independent neighbours, not one
+exposure. Same graph, same 200 scattered seeds, same RNG streams, only the
+transmission rule differs:
+
+| | adopters | rounds |
+|---|---|---|
+| simple contagion (β = 0.12) | 58,781 | 16 |
+| complex contagion (θ ≈ 0.18) | 220 | 4 |
+
+**Single-exposure spread overstates reach by 267×.** That is why the phase-1
+renderer's expanding circle was labelled a placeholder rather than shipped as a
+result.
+
+Two consequences fall out of the model rather than being assumed by it:
+
+- **Coverage is not adoption.** Seeding a story outward from the biggest
+  broadcaster reaches its ~1,275 neighbours, and they are scattered worldwide
+  and unconnected to each other — a star, not a cluster. Every one gets exactly
+  one exposure. 3,959 adopters against 59,906 for the same budget started in a
+  dense community.
+- **Where a story starts beats how loudly it starts.** Share of ties that stay
+  inside the seed set, with 400 seeds: a region 24.9%, a network neighbourhood
+  7.7%, scattered worldwide 0.5%. Only 4 of 400 scattered seeds begin with the
+  two exposures the threshold rule needs.
+
+### The result that makes a sample mean something
+
+Seed the same *fraction* of two populations sixteen times apart in size:
+
+| seeded | 60k adopts | 1M adopts |
+|---|---|---|
+| 0.1% | 0.118% | 0.117% |
+| 0.4% | 0.483% | 0.493% |
+| 1.6% | 3.427% | 3.302% |
+
+Reach tracks the seeded fraction, not the seed count — so it is a property of
+the modelled network rather than of how many personas happen to be in the
+sample. If it were not, every number the app reported would be an artefact of
+the sampler.
+
+### Two things measurement changed
+
+**The delta stream was worse than the thing it replaced.** A tick during a live
+event dirties ~99% of the population, because the opinion field moves for
+almost everyone at once. At six bytes per delta record against two for a full
+one, that is 59 MB where a full resend is 20 MB. `Sim.Encode` now picks per
+frame, and the client dispatches on the magic. Watched live at 1M: 2.00 MB,
+2.00 MB, 1.73, 1.48, 0.27, 0.15, 0.02, 0.00 as the field settles.
+
+**A predicted ordering did not survive contact.** The seeding test first
+asserted region > network > scattered. Network seeding grows outward from a
+hub, and whether a hub-mediated cascade tips is unstable — at 60k it took the
+whole population, at 1M it went nowhere. The test now asserts the mechanism
+(reinforcement) rather than an outcome that was a coin flip.
+
+### Determinism is not fastidiousness
+
+The CSR is built with atomic cursors, so within-row order depends on which
+goroutine arrived first. Left alone, that makes float accumulation order in the
+opinion update scheduling-dependent and two identical runs diverge in the last
+bits. Rows are sorted and deduplicated after the build, which fixes the order,
+removes duplicate ties that would silently double a neighbour's weight, and
+speeds up the gather. `TestGraphIsDeterministic` is what catches a regression.
+
+Both dynamics update synchronously into a second buffer. In-place would be
+Gauss-Seidel rather than Jacobi — it converges too, often faster, but it is not
+the model, and a cascade could travel an unbounded distance in one tick at a
+speed set by memory layout.
+
+### Honest limits, specific to this phase
+
+The network is generated from a plausible mixture of mechanisms — geographic
+proximity, archetype homophily, preferential attachment — not measured from
+data. Thresholds and susceptibilities are drawn from distributions with the
+right shape and uncalibrated parameters. What the tests establish is that the
+*mechanisms* behave as the literature says they do; they establish nothing
+about the magnitudes. Calibration against observed cascades is the work that
+would make a number here quotable.

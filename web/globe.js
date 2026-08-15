@@ -10,34 +10,57 @@
 
 const STRIDE = 16;
 
+// The flags word is unpacked on the GPU, not in JS. It arrives from Go in the
+// layout internal/sim.packFlags writes:
+//   bits 0-1 adoption state, bits 2-7 opinion (64 levels), bit 8 broadcaster.
+// Unpacking ten million of these per tick in JavaScript would cost more than
+// the simulation tick that produced them; here it is three integer ops in a
+// shader that was going to run anyway.
 const VS = `#version 300 es
 layout(location=0) in vec2 a_ll;      // lon, lat in radians
-layout(location=1) in float a_state;  // unpacked from flags
+layout(location=1) in uint a_flags;   // packed state, see internal/sim
 uniform float u_rot, u_radius;
 uniform vec2  u_res;
 uniform float u_size;
-out float v_state, v_face;
+out float v_state, v_op, v_media, v_face;
 void main(){
   float lon = a_ll.x + u_rot;
   float lat = a_ll.y;
   float cl  = cos(lat);
   vec3  p   = vec3(cl*sin(lon), sin(lat), cl*cos(lon));
   v_face  = p.z;                       // >0 faces the viewer
-  v_state = a_state;
+  v_state = float(a_flags & 3u);
+  v_op    = float((a_flags >> 2) & 63u) / 63.0 * 2.0 - 1.0;
+  v_media = ((a_flags & 256u) != 0u) ? 1.0 : 0.0;
   gl_Position  = vec4(p.xy * u_radius / (u_res*0.5), 0.0, 1.0);
-  gl_PointSize = u_size;
+  gl_PointSize = u_size + v_media * 1.6;
 }`;
 
+// Two channels in one dot, which is the whole reason opinion and adoption are
+// separate fields rather than one "activated" bit: hue carries which way a
+// person leans, brightness carries whether the story has reached them. A
+// population can be uniformly aware and completely split, and that is exactly
+// the state worth being able to see.
 const FS = `#version 300 es
 precision highp float;
-in float v_state, v_face;
+in float v_state, v_op, v_media, v_face;
 out vec4 o;
 void main(){
   if (v_face <= 0.02) discard;         // backface cull: one dot product
-  vec3 c = vec3(0.29,0.33,0.41);
-  if      (v_state > 1.5) c = vec3(0.851,0.467,0.235);
-  else if (v_state > 0.5) c = vec3(0.231,0.365,0.788);
-  o = vec4(c * (0.42 + 0.58*v_face), 1.0);
+  vec3 against = vec3(0.298,0.451,0.855);
+  vec3 neutral = vec3(0.361,0.388,0.451);
+  vec3 favour  = vec3(0.898,0.541,0.243);
+  float t = clamp(abs(v_op) * 1.6, 0.0, 1.0);
+  vec3 c = mix(neutral, v_op < 0.0 ? against : favour, t);
+
+  // Unaware people stay dim; carriers burn; the fatigued keep the colour they
+  // ended up with but stop drawing the eye.
+  float lum = 0.30;
+  if      (v_state > 1.5) lum = 0.62;  // fatigued: adopted, no longer spreading
+  else if (v_state > 0.5) lum = 1.35;  // actively transmitting
+  if (v_media > 0.5) lum *= 1.4;
+
+  o = vec4(c * lum * (0.42 + 0.58*v_face), 1.0);
 }`;
 
 const BODY_VS = `#version 300 es
@@ -104,8 +127,6 @@ export class Globe {
     this.n = 0;
     this.rot = 0;
     this.dirty = false;
-    this.cascade = null;
-    this.aware = 0;
     this.fps = 60;
     this.reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -134,23 +155,13 @@ export class Globe {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bInst);
     gl.bufferData(gl.ARRAY_BUFFER, body, gl.STATIC_DRAW);   // once, then never
 
-    this.state = new Uint8Array(n);
+    // The flags buffer is the only thing that changes after load. Kept as its
+    // own buffer rather than a field inside the interleaved record so a tick
+    // uploads 2 bytes per persona instead of re-uploading 16.
+    this.flags = new Uint16Array(n);
     this.bState = this.bState || gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bState);
-    gl.bufferData(gl.ARRAY_BUFFER, this.state, gl.DYNAMIC_DRAW);
-
-    // Susceptibility stands in for the archetype's disposition until the
-    // dynamics engine exists; derived from the packed arch field so it is
-    // stable per persona rather than random per load.
-    this.suscept = new Float32Array(n);
-    this.lonlat = new Float32Array(n * 2);
-    const src = new DataView(body);
-    for (let i = 0; i < n; i++) {
-      const o = i * STRIDE;
-      this.lonlat[i * 2] = src.getFloat32(o, true);
-      this.lonlat[i * 2 + 1] = src.getFloat32(o + 4, true);
-      this.suscept[i] = 0.25 + (src.getUint16(o + 12, true) % 400) / 400 * 0.7;
-    }
+    gl.bufferData(gl.ARRAY_BUFFER, this.flags, gl.DYNAMIC_DRAW);
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -159,8 +170,40 @@ export class Globe {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, STRIDE, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bState);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+    // vertexAttribIPointer, not vertexAttribPointer: the flags word is an
+    // integer to be masked, not a number to be interpolated. The float path
+    // would silently convert and the bit tests would read garbage.
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
     gl.bindVertexArray(null);
+  }
+
+  // Applies one state frame from /api/state. Two forms, chosen by the server
+  // per frame: a sparse delta while little has changed, a full flags array
+  // once more than a third of the population has moved -- at six bytes a delta
+  // record against two for a full one, the crossover is real and the wrong
+  // choice costs three times the bandwidth.
+  applyFrame(buf) {
+    const dv = new DataView(buf);
+    const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+    const count = dv.getUint32(4, true);
+    this.tick = dv.getUint32(8, true);
+    if (!this.flags) return 0;
+
+    if (magic === 'PFL1') {
+      // Whole array; the view is over the same bytes the server wrote.
+      const src = new Uint16Array(buf, 12, Math.min(count, this.flags.length));
+      this.flags.set(src);
+    } else if (magic === 'PDL1') {
+      for (let k = 0; k < count; k++) {
+        const o = 12 + k * 6;
+        const idx = dv.getUint32(o, true);
+        if (idx < this.flags.length) this.flags[idx] = dv.getUint16(o + 4, true);
+      }
+    } else {
+      throw new Error(`bad state frame magic: ${magic}`);
+    }
+    this.dirty = true;
+    return count;
   }
 
   resize() {
@@ -174,49 +217,15 @@ export class Globe {
     gl.viewport(0, 0, this.W, this.H);
   }
 
-  breakStory() {
-    if (!this.n) return;
-    const i = (Math.random() * this.n) | 0;
-    this.cascade = { lon: this.lonlat[i * 2], lat: this.lonlat[i * 2 + 1], r: 0 };
-  }
-
-  // One cascade step. Complex contagion -- requiring several independent
-  // exposures rather than one -- belongs here once the dynamics engine lands;
-  // this single-exposure front is a placeholder and will overstate reach.
-  stepCascade() {
-    const c = this.cascade;
-    if (!c) return;
-    c.r += 0.022;
-    const cl = Math.cos(c.lat);
-    const ex = cl * Math.sin(c.lon), ey = Math.sin(c.lat), ez = cl * Math.cos(c.lon);
-    const cosR = Math.cos(c.r);
-    let n = 0;
-    for (let i = 0; i < this.n; i++) {
-      if (this.state[i] !== 0) { n++; continue; }
-      const lo = this.lonlat[i * 2], la = this.lonlat[i * 2 + 1], c2 = Math.cos(la);
-      const d = c2 * Math.sin(lo) * ex + Math.sin(la) * ey + c2 * Math.cos(lo) * ez;
-      if (d > cosR && Math.random() < this.suscept[i] * 0.55) {
-        this.state[i] = this.suscept[i] > 0.62 ? 2 : 1;
-        n++;
-      }
-    }
-    this.aware = n;
-    this.dirty = true;
-    if (c.r > Math.PI) this.cascade = null;
-  }
-
   start() {
     const gl = this.gl;
-    let last = performance.now(), acc = 0;
+    let last = performance.now();
     const frame = (t) => {
       const dt = Math.min(64, t - last); last = t;
       if (!this.reduce) this.rot += dt * 0.00007;
-      acc += dt;
-      if (acc > 90) { this.stepCascade(); acc = 0; }
-
       if (this.dirty) {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bState);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.state);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.flags);
         this.dirty = false;
       }
 
@@ -244,7 +253,7 @@ export class Globe {
       gl.bindVertexArray(null);
 
       this.fps = this.fps * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
-      this.onStats({ n: this.n, fps: Math.round(this.fps), aware: this.aware });
+      this.onStats({ n: this.n, fps: Math.round(this.fps), tick: this.tick || 0 });
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);

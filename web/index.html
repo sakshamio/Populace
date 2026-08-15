@@ -54,7 +54,7 @@
 <body>
 <header>
   <h1>Populace</h1>
-  <span class="sub" id="hdr">phase 1 — placement and render at scale</span>
+  <span class="sub" id="hdr">phase 3 — social graph, opinion dynamics, complex contagion</span>
 </header>
 
 <main>
@@ -64,8 +64,10 @@
     <div class="stats">
       <span>pop <b id="s-pop">—</b></span>
       <span>fps <b id="s-fps">—</b></span>
-      <span>aware <b id="s-aware">0.0%</b></span>
-      <span>draw calls <b>1</b></span>
+      <span>tick <b id="s-tick">0</b></span>
+      <span>reach <b id="s-reach">0.00%</b></span>
+      <span>split <b id="s-split">—</b></span>
+      <span>ties <b id="s-edges">—</b></span>
       <span>load <b id="s-load">—</b></span>
     </div>
     <div class="controls">
@@ -78,16 +80,19 @@
       </select>
       <button id="reload" type="button">Load</button>
       <button id="fire" type="button">Break a story</button>
+      <button id="pause" type="button">Pause</button>
+      <button id="reset" type="button">Reset</button>
     </div>
   </div>
 </main>
 
 <div class="bar" style="position:static;border-top:0;border-bottom:2px solid var(--line);background:transparent">
   <div class="key">
-    <span><i class="sw" style="background:#4A5568"></i>unaware</span>
-    <span><i class="sw" style="background:#3B5DC9"></i>reacts positively</span>
-    <span><i class="sw" style="background:#D9773C"></i>reacts negatively</span>
-    <span>1 persona ≈ 800 people — weighted sample, not a headcount</span>
+    <span><i class="sw" style="background:#4A5568"></i>hasn&rsquo;t heard</span>
+    <span><i class="sw" style="background:#4C73DA"></i>against</span>
+    <span><i class="sw" style="background:#E58A3E"></i>in favour</span>
+    <span>brightness = carrying the story · dim = attention moved on</span>
+    <span>weighted sample, not a headcount</span>
   </div>
 </div>
 
@@ -101,13 +106,14 @@ function fail(e) {
   err.textContent = String(e && e.message ? e.message : e);
   console.error(e);
 }
+const pct = (v) => (v * 100).toFixed(2) + '%';
 
 let globe;
 try {
-  globe = new Globe($('gl'), ({ n, fps, aware }) => {
+  globe = new Globe($('gl'), ({ n, fps, tick }) => {
     $('s-pop').textContent = n.toLocaleString();
     $('s-fps').textContent = fps;
-    $('s-aware').textContent = (n ? (aware / n * 100) : 0).toFixed(1) + '%';
+    $('s-tick').textContent = tick;
   });
   globe.start();
 } catch (e) {
@@ -134,8 +140,79 @@ async function load() {
   }
 }
 
+// State and statistics are polled separately and at different rates on
+// purpose: the flags frame is the one that can be megabytes, and there is no
+// reason to re-derive weighted aggregates over the whole population just to
+// keep a number in a status bar moving.
+let polling = false;
+async function pollState() {
+  if (polling || !globe || !globe.n) return;
+  polling = true;
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (res.ok) globe.applyFrame(await res.arrayBuffer());
+  } catch (e) { /* a dropped frame is not worth an error banner */ }
+  polling = false;
+}
+
+async function pollStats() {
+  try {
+    const res = await fetch('/api/stats', { cache: 'no-store' });
+    if (!res.ok) return;
+    const { snapshot: s, running } = await res.json();
+    $('s-reach').textContent = pct(s.reach);
+    $('s-split').textContent =
+      `${pct(s.share_against)} / ${pct(s.share_for)}`;
+    $('s-edges').textContent = s.edges.toLocaleString();
+    $('pause').textContent = running ? 'Pause' : 'Resume';
+  } catch (e) { /* same */ }
+}
+
+const HEADLINES = [
+  ['Regulator opens inquiry into the largest carrier', -0.8],
+  ['Central bank holds rates for a fourth quarter', -0.2],
+  ['Coastal cities agree a joint flood-defence fund', 0.6],
+  ['Leaked memo contradicts the official account', -0.9],
+  ['Trial results published for the new treatment', 0.8],
+];
+
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.ok ? res.json() : null;
+}
+
 $('reload').addEventListener('click', load);
-$('fire').addEventListener('click', () => globe && globe.breakStory());
+$('reset').addEventListener('click', async () => {
+  await post('/api/control', { reset: true });
+  pollStats();
+});
+$('pause').addEventListener('click', async () => {
+  const running = $('pause').textContent === 'Pause';
+  await post('/api/control', { running: !running });
+  pollStats();
+});
+$('fire').addEventListener('click', async () => {
+  const [headline, stance] = HEADLINES[(Math.random() * HEADLINES.length) | 0];
+  $('hdr').textContent = headline;
+  // Seeded in a region rather than scattered worldwide: a complex contagion
+  // started by scattering the same number of seeds does not start at all --
+  // nobody gets the second exposure the threshold rule requires.
+  //
+  // The seed is a *fraction* of the population, not a fixed count, because
+  // that is what reach actually tracks: seeding 1% reaches ~1.4% at sixty
+  // thousand and at one million alike. A fixed 300 people would be a story at
+  // small scale and a rounding error at large.
+  const seed_size = Math.max(400, Math.round(globe.n / 100));
+  await post('/api/event', { headline, stance, salience: 0.7, seeding: 'region', seed_size });
+  pollStats();
+});
+
+setInterval(pollState, 400);
+setInterval(pollStats, 1000);
 load();
 </script>
 </body>
