@@ -111,7 +111,11 @@ func (o *Opinion) Step(g *Graph) float64 { return o.StepWith(g, nil, nil) }
 // where a sorted feed returns something close to the reader's own position --
 // so the social term stops pulling them anywhere and their prior wins.
 func (o *Opinion) StepWith(g *Graph, m *Media, w *world.World) float64 {
-	useMedia := m.Enabled() && w != nil
+	// Checked once per tick, not once per persona. FeedPull is called inside
+	// the hot loop and loops the platform list; hoisting the "is anything even
+	// on a feed right now" test out of it keeps a world at rest costing exactly
+	// what it cost before platforms existed.
+	useMedia := m.Live() && w != nil
 	partial := make([]float64, numWorkers(len(o.Y)))
 	parallelIdx(len(o.Y), func(c, lo, hi int) {
 		local := 0.0
