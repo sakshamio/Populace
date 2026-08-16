@@ -59,6 +59,16 @@ type server struct {
 	applyW     float64
 
 	exp *experiment.Runner
+
+	// placeIdx is built once at startup so /api/street never scans the whole
+	// population -- see world.BuildPlaceIndex.
+	placeIdx *world.PlaceIndex
+	// street is the one roster currently on screen, if any. Kept fixed across
+	// polls (only Refresh runs) so a viewer watches the same named people's
+	// state change rather than a different draw shuffling in underneath them;
+	// a new place or an explicit reroll replaces it outright.
+	street    *sim.Street
+	streetGen uint64
 }
 
 // startedAt is process start, reported so an operator can tell a server that
@@ -138,7 +148,8 @@ func main() {
 
 	srv := &server{w: w, s: s, cfg: cfg, running: *run,
 		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW,
-		speed: 1, exp: experiment.NewRunner()}
+		speed: 1, exp: experiment.NewRunner(),
+		placeIdx: world.BuildPlaceIndex(w)}
 	// Wired unconditionally: reactionSource.Reaction checks srv.relay itself
 	// and returns false with no model configured, which is exactly the
 	// fallback-to-canned-lines behaviour the chat already had.
@@ -184,6 +195,7 @@ func main() {
 	mux.HandleFunc("/api/media", srv.mediaStatus)
 	mux.HandleFunc("/api/chat", srv.chat)
 	mux.HandleFunc("/api/cohort", srv.cohort)
+	mux.HandleFunc("/api/street", srv.streetView)
 	mux.HandleFunc("/api/experiment", srv.experimentStatus)
 	mux.HandleFunc("/api/experiment/run", srv.experimentRun)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
@@ -531,6 +543,56 @@ func (srv *server) cohort(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, map[string]any{"ok": true, "kind": kind.String()})
 }
 
+// streetRosterSize bounds how many named residents a street-level view shows
+// at once. Large enough to see real local structure, small enough that
+// uniqueName's ~10-names-per-region lists don't collide constantly and that
+// drawing every tie stays legible rather than becoming a hairball.
+const streetRosterSize = 48
+
+// street returns a bounded, named roster of real people at one place -- the
+// zoom rung between the population-scale globe and a single persona's
+// inspector card. See internal/sim/street.go for the mechanism.
+//
+// The roster is cached server-side and only rebuilt on a place change or an
+// explicit reroll (?reroll=1); every other poll just re-reads live state for
+// the same fixed ids via Street.Refresh, which is why this doesn't cost
+// anywhere near what /api/persona's linear scan does -- see main.go's own
+// comment on that handler for why that scan is fine only for an occasional
+// click and would not be for something polled repeatedly.
+func (srv *server) streetView(rw http.ResponseWriter, r *http.Request) {
+	pid, err := strconv.Atoi(r.URL.Query().Get("place"))
+	if err != nil || pid < 0 || pid >= world.NumPlaces() {
+		http.Error(rw, "place is required, a valid place id", http.StatusBadRequest)
+		return
+	}
+	reroll := r.URL.Query().Get("reroll") == "1"
+
+	srv.mu.Lock()
+	if srv.street == nil || srv.street.PlaceID != uint16(pid) || reroll {
+		srv.streetGen++
+		st := sim.NewStreet(srv.w, srv.s.G, srv.placeIdx, uint16(pid), srv.streetGen, streetRosterSize)
+		if st == nil {
+			srv.mu.Unlock()
+			http.Error(rw, "nobody lives there in this population", http.StatusUnprocessableEntity)
+			return
+		}
+		srv.street = st
+	}
+	srv.street.Refresh(srv.s)
+	// Copy under the lock, same reasoning as /api/chat: Residents is mutated
+	// in place by Refresh, and JSON-encoding it directly would race the tick
+	// loop for the whole of the serialisation.
+	residents := append(make([]sim.StreetResident, 0, len(srv.street.Residents)), srv.street.Residents...)
+	out := map[string]any{
+		"place_id": srv.street.PlaceID, "place": srv.street.PlaceName, "region": srv.street.Region,
+		"lat": srv.street.Lat, "lon": srv.street.Lon,
+		"residents": residents,
+	}
+	srv.mu.Unlock()
+
+	writeJSON(rw, out)
+}
+
 func (srv *server) breakdown(rw http.ResponseWriter, r *http.Request) {
 	srv.mu.Lock()
 	b := srv.s.Breakdown()
@@ -759,7 +821,7 @@ func (srv *server) persona(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := map[string]any{
-		"id": best, "place": srv.w.PlaceName(best),
+		"id": best, "place": srv.w.PlaceName(best), "place_id": srv.w.Place[best],
 		"role": a.Role().Name, "region": world.Regions[a.Region()].Name,
 		"stratum":   world.Strata[a.Role().Stratum].Name,
 		"archetype": int(a), "describe": a.Describe(),

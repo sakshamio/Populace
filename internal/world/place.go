@@ -267,6 +267,37 @@ func PlaceInfo(i int) (name string, region Region, lat, lon float64) {
 	return c.name, c.region, c.lat, c.lon
 }
 
+// PlaceIndex buckets every persona id by the place they were generated at, so
+// a query for "who lives in Lagos" is a slice lookup rather than a scan of the
+// whole population. /api/persona's linear scan is fine for a click a human
+// makes once a second; a street-level view that a client polls every few
+// seconds needs the O(N) work done exactly once, at load, not on every
+// request.
+type PlaceIndex struct {
+	buckets [][]int32
+}
+
+// BuildPlaceIndex does the one full pass. Call it once after Generate.
+func BuildPlaceIndex(w *World) *PlaceIndex {
+	idx := &PlaceIndex{buckets: make([][]int32, NumPlaces())}
+	for i := 0; i < w.N; i++ {
+		p := w.Place[i]
+		idx.buckets[p] = append(idx.buckets[p], int32(i))
+	}
+	return idx
+}
+
+// Personas is every persona id generated at place p, in index order (not a
+// random or representative sample -- see reservoir sampling in package sim
+// for how a street roster draws from this without the same urbanity bias
+// that made reservoirK necessary for cohorts).
+func (idx *PlaceIndex) Personas(p int) []int32 {
+	if p < 0 || p >= len(idx.buckets) {
+		return nil
+	}
+	return idx.buckets[p]
+}
+
 // samplePosition returns degrees (lat, lon) and the centre it was drawn from,
 // plus how far out it landed in units of that centre's spread. Urbanity is
 // returned rather than recomputed later because the caller needs it to choose

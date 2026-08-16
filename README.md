@@ -183,6 +183,38 @@ Takeshi  ↳ replying to Takeshi
 See `internal/reaction/dialogue.go` for the prompt and
 `Cohort.releaseScript` in `internal/sim/cohort.go` for the release mechanism.
 
+## Street level
+
+The view ladder is world, place, network, person. Globe and map are the
+world; the group chat is a fixed six-person network; the persona inspector is
+one person. Street level fills the gap between world and network: a bounded,
+named roster of real people who actually live at one place, drawn from
+`internal/world.PlaceIndex` (a place-to-persona bucket built once at load, not
+scanned per request) and refreshed for live opinion/state on every poll
+without ever rebuilding the roster underneath the viewer.
+
+Entered by clicking someone on the globe and then "zoom to street level" in
+their card -- never as a blank tab, because street level only means something
+once you know *which* place. Rendered on a hand-rolled Canvas2D layer
+(`web/street.js`), not the globe's WebGL pipeline: a few dozen named dots and
+the ties between them is a labelling problem, the same reasoning that made the
+group chat plain DOM instead of a third shader program. Positions are each
+resident's real generated lon/lat, not a layout algorithm -- the true Gaussian
+scatter around the place centre.
+
+The interesting finding building this: checking "is this graph neighbour also
+in the roster I happened to draw" turned out to be close to useless. An
+empirical check on a 2M population found that only about 1 in 6,000 of a
+place's real same-place ties survive into an arbitrary 48-person sample, even
+though roughly 10% of anyone's ties genuinely share their own named place.
+Drawing lines only for in-roster hits would have made every street-level view
+look like nobody knows their neighbours. `StreetResident` instead checks
+`world.Place` directly and reports three real numbers per person: ties drawn
+on screen, ties to someone at the same place who didn't make the roster ("N
+more nearby, not shown"), and ties that genuinely leave the neighbourhood --
+matching `graph.go`'s own finding that only ~55% of anyone's edges are
+geographic in the first place. See `internal/sim/street.go`.
+
 ## What is not here, and why
 
 **Step back.** Rewinding needs a stored copy of every persona per tick: 20 MB a

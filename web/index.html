@@ -328,6 +328,37 @@
   .chat-empty{color:#8FA0C7;font-family:var(--font-body);font-weight:700;font-size:12px;
     padding:24px 0;line-height:1.7}
 
+  /* Street level: same deep porthole as the chat, but the content is a
+     canvas rather than DOM -- a few dozen named dots and the ties between
+     them, close enough to a node-link diagram that hand-rolled 2D drawing
+     beats fighting either the WebGL globe pipeline or a chart library for
+     something this small. */
+  #streetview{position:absolute;inset:0;background:var(--deep);
+    display:flex;flex-direction:column;z-index:3;overflow:hidden}
+  #streetview[hidden]{display:none}
+  .streethead{padding:60px 22px 14px;border-bottom:2px solid var(--deep-line);flex:none;
+    background:linear-gradient(160deg,rgba(23,182,160,.16),transparent 60%)}
+  .streethead h3{margin:0;font-family:var(--font-display);font-weight:600;font-size:16px;
+    color:#fff;display:flex;gap:10px;align-items:baseline}
+  .streethead h3 em{font-style:normal;color:var(--gold);font-family:var(--font-body);
+    font-weight:800;font-size:13px;text-transform:none}
+  .streethead .note{color:#AAB8D6}
+  #st-canvaswrap{position:relative;flex:1;min-height:0}
+  #st-canvas{position:absolute;inset:0;width:100%;height:100%;cursor:pointer}
+  #st-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    text-align:center;padding:0 30%}
+  #st-empty:empty{display:none}
+
+  /* A fixed-position hover card following the pointer over the canvas --
+     positioned in JS from getBoundingClientRect, so it has to be `fixed`
+     rather than relying on an offsetParent. */
+  .sttip{position:fixed;z-index:20;pointer-events:none;background:var(--deep2);
+    border:2px solid var(--deep-line);border-radius:12px;padding:8px 11px;
+    font-family:var(--font-body);max-width:220px;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .sttip b{display:block;font-family:var(--font-display);font-weight:600;font-size:12.5px;color:#fff}
+  .sttip span{display:block;font-weight:700;font-size:10px;color:#AAB8D6;margin-top:1px}
+  .sttip i{font-style:normal;display:block;font-weight:700;font-size:9.5px;color:var(--gold);margin-top:4px}
+
   /* Platform rows in the media panel. */
   .plat{display:grid;grid-template-columns:1fr 52px;gap:2px 8px;padding:9px 0;
     border-bottom:1.5px dashed var(--line)}
@@ -378,6 +409,7 @@
       <button role="tab" class="vb on" data-view="globe" aria-selected="true">🌐 Globe<em>the world</em></button>
       <button role="tab" class="vb" data-view="map" aria-selected="false">🗺️ Map<em>geography</em></button>
       <button role="tab" class="vb" data-view="chat" aria-selected="false">💬 Group chat<em>six people</em></button>
+      <button role="tab" class="vb" data-view="street" aria-selected="false">🏘️ Street<em>who lives here</em></button>
     </div>
 
     <div id="chatview" hidden>
@@ -405,6 +437,23 @@
         <div id="ch-log" class="log"></div>
       </div>
     </div>
+
+    <div id="streetview" hidden>
+      <div class="streethead">
+        <div class="chatheadrow">
+          <h3>🏘️ Street level <em id="st-place"></em></h3>
+          <button id="st-reroll" type="button" class="ghost" disabled>🔀 Different neighbours</button>
+        </div>
+        <p class="note" style="margin:2px 0 0" id="st-sketch">Click someone on the globe or the
+          map, then &ldquo;zoom to street level&rdquo; in their card to see who really lives near
+          them &mdash; real people, real positions, and the graph ties that actually connect them.</p>
+      </div>
+      <div id="st-canvaswrap">
+        <canvas id="st-canvas" aria-label="Named residents of the selected place and their ties"></canvas>
+        <div id="st-empty" class="chat-empty">No place selected yet.</div>
+      </div>
+    </div>
+    <div id="st-tip" class="sttip" hidden></div>
 
     <div class="bar">
       <div class="key">
@@ -630,6 +679,7 @@
 
 <script type="module">
 import { Globe } from './globe.js';
+import { StreetView } from './street.js';
 
 const $ = (id) => document.getElementById(id);
 const err = $('err');
@@ -658,6 +708,9 @@ try {
 } catch (e) {
   fail(e);
 }
+
+const streetView = new StreetView($('st-canvas'), $('st-tip'));
+streetView.onPick = (res) => showPersonaAt(res.lon, res.lat);
 
 // --- sparklines ---------------------------------------------------------
 // Drawn by hand on a canvas rather than pulled from a chart library: the CSP an
@@ -952,14 +1005,12 @@ $('gen').addEventListener('click', async () => {
 // The panel exists to make one person's behaviour explicable rather than
 // mysterious: it shows how many of their neighbours have adopted and how many
 // they need, which is exactly the comparison the threshold rule performs.
-$('gl').addEventListener('click', async (ev) => {
-  // A drag that ends over the globe fires a click too. Without this, every
-  // attempt to turn the world also opens the inspector on a random bystander.
-  if (globe.suppressClick) { globe.suppressClick = false; return; }
-  if (!globe || !globe.n) return;
-  const hit = globe.pick(ev.clientX, ev.clientY);
-  if (!hit) { $('pane-persona').style.display = 'none'; return; }
-  const p = await getJSON(`/api/persona?lon=${hit.lon}&lat=${hit.lat}`);
+//
+// Factored out of the click handler so a street-level dot can open the same
+// card a globe click does -- both resolve to a real lon/lat and the server
+// does the same nearest-persona lookup either way.
+async function showPersonaAt(lon, lat) {
+  const p = await getJSON(`/api/persona?lon=${lon}&lat=${lat}`);
   if (!p) return;
 
   $('pane-persona').style.display = '';
@@ -983,9 +1034,30 @@ $('gl').addEventListener('click', async (ev) => {
           <span style="color:var(--muted)">(prior ${p.prior.toFixed(3)})</span></dd>
       <dt>stands for</dt><dd>${num(Math.round(p.weight * 1000) / 1000)} people like them</dd>
     </dl>${say}
+    <button type="button" class="ghost q-street-btn" data-place="${p.place_id}"
+      style="margin-top:11px;width:100%">🏘️ Zoom to street level in ${esc(p.place)}</button>
     <p class="note">What varies <em>within</em> an archetype &mdash; position, ties,
     threshold, prior &mdash; is cheap deterministic Go. What varies <em>between</em>
     archetypes is what the model was asked.</p>`;
+}
+
+$('gl').addEventListener('click', async (ev) => {
+  // A drag that ends over the globe fires a click too. Without this, every
+  // attempt to turn the world also opens the inspector on a random bystander.
+  if (globe.suppressClick) { globe.suppressClick = false; return; }
+  if (!globe || !globe.n) return;
+  const hit = globe.pick(ev.clientX, ev.clientY);
+  if (!hit) { $('pane-persona').style.display = 'none'; return; }
+  await showPersonaAt(hit.lon, hit.lat);
+});
+
+// The button lives inside q-body, which is replaced wholesale on every
+// click -- delegate from the panel itself rather than rebinding a listener
+// on a button that gets thrown away and recreated each time.
+$('q-body').addEventListener('click', (e) => {
+  const btn = e.target.closest('.q-street-btn');
+  if (!btn) return;
+  openStreet(Number(btn.dataset.place));
 });
 
 // --- story composer -----------------------------------------------------
@@ -1111,10 +1183,10 @@ async function pollExperiment() {
 
 // ---------------------------------------------------------------- views
 
-// The three views are the same simulation at three magnifications. Globe and
-// map share a renderer and morph between each other; the chat is DOM, because
-// six people reading as a conversation is a typographic problem rather than a
-// rendering one.
+// The four views are the same simulation at four magnifications: world,
+// place, network, person. Globe and map share a renderer and morph between
+// each other; chat and street are DOM/canvas, because named people and the
+// ties between them are a labelling problem, not a raw-throughput one.
 let view = 'globe';
 function setView(v) {
   view = v;
@@ -1124,11 +1196,14 @@ function setView(v) {
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   }
   $('chatview').hidden = v !== 'chat';
-  if (v !== 'chat') globe.setView(v);
-  // Polling the chat is pointless while it is not on screen, and at one request
-  // a second for a view nobody is looking at it is the kind of cost that only
+  $('streetview').hidden = v !== 'street';
+  $('st-tip').hidden = true;
+  if (v !== 'chat' && v !== 'street') globe.setView(v);
+  // Polling a view that is not on screen is pointless, and at one request a
+  // second for a view nobody is looking at it is the kind of cost that only
   // shows up in someone else's bandwidth bill.
   if (v === 'chat') pollChat();
+  if (v === 'street') pollStreet();
 }
 for (const b of document.querySelectorAll('.vb')) {
   b.addEventListener('click', () => setView(b.dataset.view));
@@ -1307,6 +1382,44 @@ $('ch-reroll').addEventListener('click', async () => {
   $('ch-reroll').disabled = false;
 });
 
+// --- street level ---------------------------------------------------------
+// Entered from the persona inspector's "zoom to street level" button, never
+// as a blank tab -- street level only means something once you know *which*
+// place, and the inspector is already the thing that resolves a click to a
+// place. See internal/sim/street.go for how the roster itself is drawn and
+// kept stable across polls.
+let streetPlaceId = null;
+
+function openStreet(placeId) {
+  streetPlaceId = placeId;
+  setView('street');
+}
+
+async function pollStreet(reroll = false) {
+  if (view !== 'street') return;
+  if (streetPlaceId == null) {
+    $('st-empty').textContent = 'No place selected yet.';
+    $('st-reroll').disabled = true;
+    streetView.clear();
+    return;
+  }
+  // getJSON swallows a non-2xx into null (see its own comment) -- here that
+  // means either a bad place id or, at a small -n, a place nobody landed in.
+  const d = await getJSON(`/api/street?place=${streetPlaceId}${reroll ? '&reroll=1' : ''}`);
+  if (!d) {
+    $('st-empty').textContent = "Nobody lives there in this population — try a bigger world.";
+    $('st-reroll').disabled = true;
+    streetView.clear();
+    return;
+  }
+  $('st-empty').textContent = '';
+  $('st-reroll').disabled = false;
+  $('st-place').textContent = `${d.place}, ${d.region}`;
+  streetView.setData(d);
+}
+
+$('st-reroll').addEventListener('click', () => pollStreet(true));
+
 function refresh() { pollStats(); pollBreakdown(); pollSeries(); pollQuotes(); pollMedia(); }
 
 setInterval(pollState, 400);
@@ -1318,6 +1431,7 @@ setInterval(pollBreakdown, 3000);   // a full weighted scan of the population
 setInterval(pollExperiment, 1200);
 setInterval(pollMedia, 1200);
 setInterval(pollChat, 900);
+setInterval(pollStreet, 900);
 window.addEventListener('resize', pollSeries);
 
 setSpeed(1);
