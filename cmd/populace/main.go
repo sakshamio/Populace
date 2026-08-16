@@ -59,12 +59,16 @@ var startedAt = time.Now()
 
 func main() {
 	var (
-		addr    = flag.String("addr", ":"+envOr("PORT", "8080"), "listen address")
-		n       = flag.Int("n", 1_000_000, "personas to generate at startup")
-		seed    = flag.Uint64("seed", 20260815, "world seed")
+		addr = flag.String("addr", ":"+envOr("PORT", "8080"), "listen address")
+		// Env fallbacks on the sizing knobs, because a platform deploy
+		// configures with environment variables and cannot easily pass flags.
+		// A container stuck at whatever default was compiled in is a container
+		// that OOMs on a small instance with no way to turn it down.
+		n       = flag.Int("n", envInt("POPULACE_N", 1_000_000), "personas to generate at startup")
+		seed    = flag.Uint64("seed", uint64(envInt("POPULACE_SEED", 20260815)), "world seed")
 		webDir  = flag.String("web", "web", "static assets directory")
 		maxSend = flag.Int("max", 10_000_000, "cap on personas served per request")
-		tickMS  = flag.Int("tick", 400, "milliseconds between simulation ticks")
+		tickMS  = flag.Int("tick", envInt("POPULACE_TICK_MS", 400), "milliseconds between simulation ticks")
 		run     = flag.Bool("run", true, "start ticking immediately")
 
 		gwURL   = flag.String("gateway", envOr("LLM_GATEWAY_URL", ""), "model gateway base URL; empty disables generation")
@@ -696,6 +700,23 @@ func clamp1(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// envInt reads an integer from the environment, falling back on anything that
+// is missing or unparseable. Loudly on unparseable: a typo in a platform
+// variable that silently reverts to the default is a deploy that ignores its
+// own configuration.
+func envInt(k string, d int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return d
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("WARNING: %s=%q is not a number; using %d", k, v, d)
+		return d
+	}
+	return n
 }
 
 func envOr(k, d string) string {

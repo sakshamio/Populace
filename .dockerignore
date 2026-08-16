@@ -1,0 +1,12 @@
+# The build only needs go.mod, cmd, internal and web. Everything else either
+# bloats the context or, in the case of reactions.json, bakes one machine's
+# generated model output into an image that should start with an empty cache.
+.git
+.gitignore
+bin/
+*.log
+reactions.json
+reactions.json.tmp
+README.md
+deploy/*.service
+deploy/*.md

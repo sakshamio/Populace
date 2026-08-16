@@ -40,18 +40,67 @@ which works without root. Without lingering it dies with your shell session.
 
 ## On Railway
 
-Deploy `deploy/Dockerfile`. Required variables:
+`railway.json` at the repo root points the builder at `deploy/Dockerfile`.
+**That file is not optional** — see "the 404" below.
+
+Variables. Only the first two are needed to see the app; the rest connect it to
+the model.
 
 | Variable | Value |
 |---|---|
+| `POPULACE_N` | personas, e.g. `250000`. Sized to the instance — 1M costs ~160 MB of heap plus the graph |
+| `POPULACE_TICK_MS` | ms between ticks, default `400` |
 | `TAILSCALE_AUTHKEY` | an **ephemeral, pre-authorised** key from the Tailscale admin console |
 | `TAILSCALE_HOSTNAME` | `populace-railway` |
-| `LLM_GATEWAY_URL` | `http://dgx-spark-k3:8080` (MagicDNS name) |
-| `LLM_TOKEN` | the token half of the `-token` pair above |
+| `LLM_GATEWAY_URL` | `http://dgx-spark-k3:8091` (MagicDNS name) |
+| `LLM_TOKEN` | the token half of the gateway's `name:token` pair |
+
+`PORT` is set by Railway and picked up automatically.
 
 Use an **ephemeral** auth key. Railway redeploys frequently, and a reusable
 key leaves a dead node in the tailnet for every deploy until the list is
 unusable.
+
+## The 404
+
+The first deploy served `404 page not found` on every path, and the cause is
+worth writing down because nothing in the logs points at it.
+
+Railway looks for a `Dockerfile` **at the repository root**. This one lives in
+`deploy/`, so Railway did not find it, fell back to Nixpacks, and Nixpacks
+found three commands under `cmd/` — `gateway`, `populace`, `simbench` — and
+built the wrong one. `cmd/gateway` is a reverse proxy with no static file
+serving, so it answers every path except `/v1/chat/completions` and `/healthz`
+with exactly that string.
+
+Two things now prevent it:
+
+- `railway.json` names `deploy/Dockerfile` explicitly, so the builder cannot
+  fall back to guessing.
+- The Dockerfile names `./cmd/populace` explicitly and then asserts
+  `/app/web/index.html` exists at build time. An image that cannot find its own
+  assets fails the build rather than starting and 404ing.
+
+If you ever see a bare `404 page not found` again, check *which binary* is
+running before checking anything else:
+
+```sh
+railway logs | head        # the app logs its population and graph at startup;
+                           # the gateway logs "admission N in flight"
+```
+
+## Verifying the image before pushing it
+
+Build and run it exactly as Railway will. This catches the whole class of
+"works locally, 404 in production" without a deploy cycle:
+
+```sh
+docker build -f deploy/Dockerfile -t populace-test .
+docker run --rm -e PORT=8080 -e POPULACE_N=200000 -p 8099:8080 populace-test
+
+curl -o /dev/null -w '%{http_code} %{content_type}\n' localhost:8099/   # 200 text/html
+curl -s localhost:8099/api/stats | head -c 120                           # real numbers
+```
 
 ## Verifying, in the order that isolates failures
 
