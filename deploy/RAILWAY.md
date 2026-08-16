@@ -18,6 +18,22 @@ Railway container                          DGX Spark (home)
 
 ## On the Spark
 
+Everything on this side runs as systemd `--user` units, installed by
+`deploy/install-units.sh`. There are four, and the one that keeps getting
+forgotten is `tailscaled`:
+
+| unit | what it is |
+|---|---|
+| `tailscaled` | userspace Tailscale. **Without it the Spark is not on the tailnet at all** |
+| `qwen-sglang` | the model server, ~500 s from start to serving |
+| `populace-gateway` | auth, admission control, cache |
+| `populace` | the simulation (optional here; Railway runs its own) |
+
+After a reboot, anything without a unit is simply gone. That has now happened
+twice — once to SGLang and once to `tailscaled` — and in both cases the visible
+symptom was on the *other* side of the connection, which is the worst place to
+start debugging.
+
 Run the gateway bound to the tailnet interface. SGLang itself stays on
 localhost, unauthenticated but unreachable.
 
@@ -37,6 +53,24 @@ nothing. Raising it makes the model server worse, not busier.
 
 Keep it running with a systemd `--user` unit and `loginctl enable-linger`,
 which works without root. Without lingering it dies with your shell session.
+
+### The gateway must be *served* onto the tailnet
+
+Binding `127.0.0.1:8091` is deliberate — it keeps the gateway off the LAN — but
+userspace tailscaled has no TUN device, so the tailnet IP is not a local
+interface and a localhost listener is **not reachable from other nodes**. The
+bridge is `tailscale serve`:
+
+```sh
+tailscale serve --bg --http=8091 http://127.0.0.1:8091
+tailscale serve status     # http://dgx-spark-k3:8091 -> proxy 127.0.0.1:8091
+```
+
+This is easy to get wrong in a way that looks like a Railway problem: the
+gateway is running, `/healthz` answers on localhost, and the client on the
+other end times out. The serve config lives in tailscaled's state directory, so
+it survives a restart — but a *stale* rule survives too. One pointed at port
+8713 (the retired DSV4 API) for weeks after that service was disabled.
 
 ## On Railway
 

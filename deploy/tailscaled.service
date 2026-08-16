@@ -1,0 +1,34 @@
+[Unit]
+Description=Tailscale (userspace, no root)
+Documentation=https://github.com/sakshamio/Populace/blob/main/deploy/RAILWAY.md
+After=network-online.target
+
+# Same reasoning as the other units: a budget wide enough in wall-clock terms
+# to ride out a transient network fault, narrow enough to stop on a real one.
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sakshamio/kimi-k3-inference
+
+# Userspace networking because there is no root on this box and so no TUN
+# device. The SOCKS5 listener is what anything on this machine would use to
+# reach the tailnet; inbound traffic (which is what Railway needs) works
+# regardless, which is why `tailscale serve` still functions in this mode.
+ExecStart=/home/sakshamio/bin/tailscaled \
+  --tun=userspace-networking \
+  --socks5-server=localhost:1055 \
+  --outbound-http-proxy-listen=localhost:1055 \
+  --statedir=/home/sakshamio/kimi-k3-inference/.ts \
+  --socket=/home/sakshamio/kimi-k3-inference/.ts/tailscaled.sock
+
+Restart=always
+RestartSec=10s
+TimeoutStopSec=20
+
+StandardOutput=append:/home/sakshamio/tailscaled.log
+StandardError=append:/home/sakshamio/tailscaled.log
+
+[Install]
+WantedBy=default.target
