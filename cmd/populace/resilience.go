@@ -58,7 +58,15 @@ func (srv *server) tickOnce() (ok bool) {
 	}()
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if srv.running {
+	// steps is the single-step budget: a paused clock still advances if the
+	// user asked for exactly one tick. Decremented under the same lock that
+	// guards the simulation, so a burst of clicks cannot race into a double
+	// advance.
+	switch {
+	case srv.steps > 0:
+		srv.steps--
+		srv.s.Advance()
+	case srv.running:
 		srv.s.Advance()
 	}
 	return true
@@ -75,14 +83,63 @@ func (srv *server) tickOnce() (ok bool) {
 // again immediately, and an un-throttled loop would write a stack trace every
 // 400 ms until the disk filled -- turning a bug in one subsystem into an
 // outage of the whole machine.
-func (srv *server) loop(every time.Duration) {
-	backoff := every
+// speed is the user's time control, as a multiplier on the base interval.
+// Bounded on both ends: below 0.1 the clock is indistinguishable from paused
+// and the user should just pause, and above 8 the tick loop starts competing
+// with the HTTP handlers for the same lock at ten million personas, which
+// presents as a UI that stops responding rather than as a simulation that runs
+// fast. Neither bound is a matter of taste.
+const (
+	minSpeed = 0.1
+	maxSpeed = 8.0
+)
+
+// interval converts the requested speed into a sleep, and never returns
+// something so small that the loop starves everything else.
+func (srv *server) interval(base time.Duration) time.Duration {
+	srv.mu.Lock()
+	sp := srv.speed
+	srv.mu.Unlock()
+	if sp <= 0 {
+		sp = 1
+	}
+	d := time.Duration(float64(base) / sp)
+
+	// A paused clock must not spin at the fastest speed polling for a step
+	// request. It still needs to poll often enough that Step feels immediate,
+	// so it settles at a fixed 50 ms rather than following the speed dial.
+	if d < 25*time.Millisecond {
+		d = 25 * time.Millisecond
+	}
+	return d
+}
+
+func (srv *server) loop(base time.Duration) {
 	const maxBackoff = 5 * time.Minute
+	backoff := time.Duration(0)
 	for {
-		time.Sleep(backoff)
+		if backoff > 0 {
+			time.Sleep(backoff)
+		} else {
+			// Re-read the speed every iteration rather than capturing it once:
+			// the whole point of the control is that it takes effect without a
+			// restart, and a loop that sampled the interval at startup would
+			// accept the request, report success, and change nothing.
+			srv.mu.Lock()
+			paused := !srv.running && srv.steps == 0
+			srv.mu.Unlock()
+			if paused {
+				time.Sleep(50 * time.Millisecond)
+			} else {
+				time.Sleep(srv.interval(base))
+			}
+		}
 		if srv.tickOnce() {
-			backoff = every
+			backoff = 0
 			continue
+		}
+		if backoff == 0 {
+			backoff = base
 		}
 		if backoff < maxBackoff {
 			backoff *= 4

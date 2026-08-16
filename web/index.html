@@ -139,7 +139,78 @@
   .armrow .ci s{position:absolute;top:1px;bottom:1px;background:var(--line);opacity:.7}
   .armrow .val{font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
 
+  /* View switcher, floating over the stage. */
+  .views{position:absolute;top:12px;left:14px;display:flex;gap:2px;z-index:4;
+    background:rgba(11,14,20,.82);border:1px solid var(--line)}
+  .vb{background:transparent;border:0;border-right:1px solid var(--line2);
+    padding:7px 12px;display:flex;flex-direction:column;gap:1px;align-items:flex-start;
+    color:var(--muted);font-weight:700}
+  .vb:last-child{border-right:0}
+  .vb em{font-style:normal;font-size:8.5px;letter-spacing:.09em;color:var(--muted);
+    text-transform:none;opacity:.75;font-weight:400}
+  .vb.on{background:var(--accent);color:#fff}
+  .vb.on em{color:#fff;opacity:.8}
+  .vb:hover:not(.on){background:var(--line2);color:var(--ink)}
+
+  /* Transport controls. */
+  .transport{display:flex;gap:2px;align-items:center;border:1px solid var(--line);padding:2px}
+  .speeds{display:flex;gap:0}
+  .sp{padding:6px 7px;border-right-width:0;font-size:10px;letter-spacing:.02em}
+  .sp:last-child{border-right-width:2px}
+  .sp.on{background:var(--ink);color:var(--void);border-color:var(--ink)}
+
+  /* The group chat view: a phone-shaped transcript beside the six people. */
+  #chatview{position:absolute;inset:0 0 62px 0;background:var(--void);
+    display:flex;flex-direction:column;z-index:3;overflow:hidden}
+  .chathead{padding:52px 20px 12px;border-bottom:1px solid var(--line2);flex:none}
+  .chathead h3{margin:0;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    display:flex;gap:10px;align-items:baseline}
+  .chathead h3 em{font-style:normal;color:var(--accent);letter-spacing:.04em;
+    text-transform:none;font-size:13px}
+  .chatgrid{flex:1;display:flex;min-height:0}
+  .people{width:280px;flex:none;border-right:1px solid var(--line2);overflow-y:auto;padding:10px}
+  .log{flex:1;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:2px}
+
+  .person{border:1px solid var(--line2);padding:8px 9px;margin-bottom:7px}
+  .person .nm{display:flex;justify-content:space-between;align-items:baseline;gap:6px}
+  .person .nm b{font-size:12px}
+  .person .nm span{font-size:9px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+  .person .rl{font-size:10px;color:var(--muted);margin-top:2px}
+  .person .st{font-size:9.5px;margin-top:5px;letter-spacing:.05em;text-transform:uppercase}
+  .person .pf{font-size:9px;color:var(--muted);margin-top:4px;line-height:1.5}
+  .person.heard{border-color:var(--accent)}
+  .person.feed{border-color:#C759B8}
+
+  /* Messages. Alternating alignment would imply "me vs them", which is wrong
+     here -- there is no viewer in this chat, you are reading over a shoulder. */
+  .msg{display:grid;grid-template-columns:64px 1fr;gap:10px;padding:4px 0;align-items:baseline}
+  .msg .t{font-size:9px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+  .msg .b{background:var(--panel);border:1px solid var(--line2);padding:7px 10px;
+    max-width:min(560px,86%);font-size:12px;line-height:1.5}
+  .msg .b b{display:block;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:3px}
+  .msg .b i{font-style:normal;display:block;font-size:9px;color:var(--muted);margin-top:4px}
+  .msg.feed .b{border-color:#8E4487}
+  .msg.feed .b b{color:#C759B8}
+  .chat-empty{color:var(--muted);font-size:11px;padding:20px 0;line-height:1.6}
+
+  /* Platform rows in the media panel. */
+  .plat{display:grid;grid-template-columns:1fr 52px;gap:1px 8px;padding:6px 0;
+    border-bottom:1px solid var(--line2)}
+  .plat .pn{font-size:11px;display:flex;gap:6px;align-items:baseline}
+  .plat .pn s{text-decoration:none;font-size:8.5px;color:var(--muted);
+    border:1px solid var(--line);padding:0 3px;letter-spacing:.05em}
+  .plat .pv{font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+  .plat .pbar{grid-column:1/-1;height:4px;background:#0A0D13;border:1px solid var(--line2)}
+  .plat .pbar{position:relative}
+  .plat .pbar i{display:block;height:100%;background:#C759B8}
+  .plat .pbar u{position:absolute;top:-1px;bottom:-1px;width:2px;background:var(--ink);
+    text-decoration:none;opacity:.8}
+  .plat .pm{grid-column:1/-1;font-size:9px;color:var(--muted);letter-spacing:.04em}
+
   @media (max-width:1000px){
+    .people{width:190px}
+    .chathead{padding-top:56px}
     main{flex-direction:column}
     aside{width:auto;border-left:0;border-top:2px solid var(--line);max-height:46vh}
   }
@@ -155,14 +226,54 @@
   <div class="stage">
     <canvas id="gl" aria-label="Rotating globe showing the simulated population"></canvas>
     <div id="err" role="alert"></div>
+    <!-- View switcher, top-left over the stage. Scale is named in words rather
+         than numbers because the ladder is what it is telling you: the same
+         world at four magnifications, not four unrelated screens. -->
+    <div class="views" role="tablist" aria-label="view">
+      <button role="tab" class="vb on" data-view="globe" aria-selected="true">Globe<em>the world</em></button>
+      <button role="tab" class="vb" data-view="map" aria-selected="false">Map<em>geography</em></button>
+      <button role="tab" class="vb" data-view="chat" aria-selected="false">Group chat<em>six people</em></button>
+    </div>
+
+    <div id="chatview" hidden>
+      <div class="chathead">
+        <h3>The group chat <em id="ch-origin"></em></h3>
+        <p class="note" style="margin:2px 0 0">Six people who grew up in the same place. Everything
+          they say is produced by their own state in the simulation running behind
+          this &mdash; if the cascade above says a story reached the world and nobody
+          here has heard of it, one of the two is wrong.</p>
+      </div>
+      <div class="chatgrid">
+        <div id="ch-people" class="people"></div>
+        <div id="ch-log" class="log"></div>
+      </div>
+    </div>
+
     <div class="bar">
       <div class="key">
         <span><i class="sw" style="background:#4A5568"></i>hasn&rsquo;t heard</span>
         <span><i class="sw" style="background:#4C73DA"></i>against</span>
         <span><i class="sw" style="background:#E58A3E"></i>in favour</span>
-        <span>bright = carrying it &middot; dim = moved on</span>
+        <span><i class="sw" style="background:#C759B8"></i>reached by feed</span>
       </div>
+
+      <!-- Transport. Grouped and ordered like a media transport because that is
+           the thing everyone already knows how to operate: step back is absent
+           on purpose (see the note in the Time panel) and its slot is not left
+           as a dead button pretending otherwise. -->
       <div class="controls">
+        <div class="transport">
+          <button id="pause" type="button" title="Play / pause (space)">Pause</button>
+          <button id="step" type="button" class="ghost" title="Advance one tick (right arrow)">Step</button>
+          <div class="speeds" role="group" aria-label="speed">
+            <button type="button" class="sp ghost" data-speed="0.25">&frac14;&times;</button>
+            <button type="button" class="sp ghost" data-speed="0.5">&frac12;&times;</button>
+            <button type="button" class="sp ghost on" data-speed="1">1&times;</button>
+            <button type="button" class="sp ghost" data-speed="2">2&times;</button>
+            <button type="button" class="sp ghost" data-speed="4">4&times;</button>
+            <button type="button" class="sp ghost" data-speed="8">8&times;</button>
+          </div>
+        </div>
         <select id="n" aria-label="population size">
           <option value="250000">250k</option>
           <option value="1000000" selected>1M</option>
@@ -172,7 +283,6 @@
         <button id="reload" type="button" class="ghost">Load</button>
         <button id="fire" type="button">Break a story</button>
         <button id="gen" type="button">Ask the model</button>
-        <button id="pause" type="button" class="ghost">Pause</button>
         <button id="reset" type="button" class="ghost">Reset</button>
       </div>
     </div>
@@ -185,6 +295,7 @@
         <div class="m"><span class="k">reach</span><span class="v" id="p-reach">—</span></div>
         <div class="m"><span class="k">adopters</span><span class="v" id="p-adopters">—</span></div>
         <div class="m"><span class="k">tick</span><span class="v" id="p-tick">—</span></div>
+        <div class="m"><span class="k">feed-driven</span><span class="v" id="p-feedshare">—</span></div>
       </div>
       <div class="grid" style="margin-top:10px">
         <div class="m"><span class="k">moved against</span><span class="v" id="p-dneg">—</span></div>
@@ -203,6 +314,37 @@
       <canvas class="spark" id="sp-new"></canvas>
       <div class="sparkrow"><span>opinion shift</span><span id="sp-shift-max"></span></div>
       <canvas class="spark" id="sp-shift"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Time <em id="t-state"></em></h2>
+      <div class="grid">
+        <div class="m"><span class="k">tick</span><span class="v" id="t-tick">&mdash;</span></div>
+        <div class="m"><span class="k">speed</span><span class="v" id="t-speed">1&times;</span></div>
+        <div class="m"><span class="k">tick cost</span><span class="v" id="t-cost">&mdash;</span></div>
+      </div>
+      <p class="note">Space plays and pauses; <b>&rarr;</b> steps one tick while paused.
+        There is no step <i>back</i>: rewinding needs a stored copy of every
+        persona per tick, which is 20&nbsp;MB a tick at a million people and 3.6&nbsp;GB
+        for the history this panel already keeps. The charts below are the
+        record of what happened; the world itself only moves forward.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Platforms <em id="md-state"></em></h2>
+      <div id="md-list"></div>
+      <div class="controls" style="margin-top:10px">
+        <button id="md-toggle" type="button" class="ghost">Turn platforms off</button>
+      </div>
+      <p class="note">Bar is <b>presence</b> now; the tick mark is this story&rsquo;s peak.
+        A ranked feed over-represents whatever is being engaged with, so presence
+        runs far ahead of how many people are actually posting &mdash; that gap is
+        the amplification, and it is what lets a story spread that peer ties alone
+        could not carry. The signature to read is the peak <b>level</b> on the same
+        story: measured here, the channel with no ranking function tops out
+        around 58% of its feed while a 3.4&times; amplifier reaches 75%. Timing is
+        not the tell &mdash; once a story tips, every platform follows the same
+        global engagement curve and they all peak on the same tick.</p>
     </section>
 
     <section class="panel">
@@ -447,6 +589,21 @@ async function pollStats() {
     `each (${bytes(d.wire.delta_bytes)}), a full resend 2 (${bytes(d.wire.full_bytes)}) — ` +
     `the server sends whichever is smaller.`;
   $('pause').textContent = d.running ? 'Pause' : 'Resume';
+
+  // Time panel.
+  $('t-tick').textContent = num(s.tick ?? 0);
+  $('t-cost').textContent = (d.tick_ms ?? 0).toFixed(1) + ' ms';
+  $('t-state').textContent = d.running ? 'running' : 'paused';
+  $('t-state').style.color = d.running ? 'var(--good)' : 'var(--warn)';
+
+  // Feed attribution, shown next to reach because it is a claim *about* reach:
+  // of the people who acted, how many needed the algorithm to get there.
+  if (s.media_on) {
+    $('p-feedshare').textContent = pct(s.feed_share ?? 0, 1);
+    $('p-feedshare').parentElement.style.display = '';
+  } else {
+    $('p-feedshare').parentElement.style.display = 'none';
+  }
 }
 
 async function pollSeries() {
@@ -589,6 +746,7 @@ async function post(url, body) {
 $('reload').addEventListener('click', load);
 
 $('reset').addEventListener('click', async () => {
+  chatPainted = -1;
   try { await post('/api/control', { reset: true }); } catch (e) { return fail(e); }
   current = null;
   $('hdr').textContent = 'no story yet — the world is at rest';
@@ -635,6 +793,9 @@ $('gen').addEventListener('click', async () => {
 // mysterious: it shows how many of their neighbours have adopted and how many
 // they need, which is exactly the comparison the threshold rule performs.
 $('gl').addEventListener('click', async (ev) => {
+  // A drag that ends over the globe fires a click too. Without this, every
+  // attempt to turn the world also opens the inspector on a random bystander.
+  if (globe.suppressClick) { globe.suppressClick = false; return; }
   if (!globe || !globe.n) return;
   const hit = globe.pick(ev.clientX, ev.clientY);
   if (!hit) { $('pane-persona').style.display = 'none'; return; }
@@ -788,7 +949,141 @@ async function pollExperiment() {
      outcomes span everything.</p>`;
 }
 
-function refresh() { pollStats(); pollBreakdown(); pollSeries(); pollQuotes(); }
+// ---------------------------------------------------------------- views
+
+// The three views are the same simulation at three magnifications. Globe and
+// map share a renderer and morph between each other; the chat is DOM, because
+// six people reading as a conversation is a typographic problem rather than a
+// rendering one.
+let view = 'globe';
+function setView(v) {
+  view = v;
+  for (const b of document.querySelectorAll('.vb')) {
+    const on = b.dataset.view === v;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  $('chatview').hidden = v !== 'chat';
+  if (v !== 'chat') globe.setView(v);
+  // Polling the chat is pointless while it is not on screen, and at one request
+  // a second for a view nobody is looking at it is the kind of cost that only
+  // shows up in someone else's bandwidth bill.
+  if (v === 'chat') pollChat();
+}
+for (const b of document.querySelectorAll('.vb')) {
+  b.addEventListener('click', () => setView(b.dataset.view));
+}
+
+// ---------------------------------------------------------------- time
+
+let speed = 1;
+async function setSpeed(v) {
+  speed = v;
+  for (const b of document.querySelectorAll('.sp')) {
+    b.classList.toggle('on', Number(b.dataset.speed) === v);
+  }
+  $('t-speed').textContent = (v < 1 ? v : v.toFixed(0)) + '\u00d7';
+  try { await post('/api/control', { speed: v }); } catch (e) { fail(e); }
+}
+for (const b of document.querySelectorAll('.sp')) {
+  b.addEventListener('click', () => setSpeed(Number(b.dataset.speed)));
+}
+$('step').addEventListener('click', async () => {
+  try { await post('/api/control', { running: false, step: 1 }); await pollState(); refresh(); }
+  catch (e) { fail(e); }
+});
+
+// Keyboard transport. Guarded on the target so typing a headline into the
+// compose box does not pause the simulation on every space.
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+  if (e.key === ' ') { e.preventDefault(); $('pause').click(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); $('step').click(); }
+  else if (e.key === '1') setView('globe');
+  else if (e.key === '2') setView('map');
+  else if (e.key === '3') setView('chat');
+});
+
+// ---------------------------------------------------------------- platforms
+
+async function pollMedia() {
+  const d = await getJSON('/api/media');
+  if (!d) return;
+  $('md-state').textContent = d.enabled ? 'on' : 'off';
+  $('md-state').style.color = d.enabled ? 'var(--good)' : 'var(--muted)';
+  $('md-toggle').textContent = d.enabled ? 'Turn platforms off' : 'Turn platforms on';
+  const rows = (d.platforms || []).map(p => {
+    // Live presence as the filled bar, peak as a standing tick. A cascade
+    // burns out in a few ticks, so the live number is zero almost always and a
+    // panel showing only that reads as broken rather than as quiet.
+    const pres = Math.max(0, Math.min(1, p.presence ?? 0));
+    const peak = Math.max(0, Math.min(1, p.peak ?? 0));
+    return `<div class="plat">
+      <div class="pn">${esc(p.name)}${p.closed ? '<s>no ranking</s>' : `<s>amp ${p.amplify.toFixed(1)}</s>`}</div>
+      <div class="pv">${pct(p.members, 0)}</div>
+      <div class="pbar"><i style="width:${(pres * 100).toFixed(1)}%"></i><u style="left:${(peak * 100).toFixed(1)}%"></u></div>
+      <div class="pm">peak ${(peak * 100).toFixed(1)}% at t${p.peak_at ?? 0} &middot; sorting ${p.sorting.toFixed(2)} &middot; leans ${p.feed_mean >= 0 ? '+' : ''}${p.feed_mean.toFixed(2)}</div>
+    </div>`;
+  }).join('');
+  $('md-list').innerHTML = rows || '<p class="note">No platforms configured.</p>';
+}
+$('md-toggle').addEventListener('click', async () => {
+  const on = $('md-toggle').textContent.includes('off');
+  try { await post('/api/control', { media: !on }); await pollMedia(); refresh(); }
+  catch (e) { fail(e); }
+});
+
+// ---------------------------------------------------------------- chat
+
+function opinionWord(y) {
+  if (y < -0.3) return ['against', 'neg'];
+  if (y > 0.3) return ['in favour', 'pos'];
+  return ['undecided', 'zero'];
+}
+
+async function pollChat() {
+  if (view !== 'chat') return;
+  const d = await getJSON('/api/chat');
+  if (!d || !d.available) {
+    $('ch-log').innerHTML = '<p class="chat-empty">No cohort in this world.</p>';
+    return;
+  }
+  $('ch-origin').textContent = d.origin ? 'grew up in ' + d.origin : '';
+
+  $('ch-people').innerHTML = (d.friends || []).map(f => {
+    const [word, k] = opinionWord(f.opinion);
+    const heard = f.state !== "hasn't heard";
+    return `<div class="person ${heard ? 'heard' : ''} ${f.feed_reached ? 'feed' : ''}">
+      <div class="nm"><b>${esc(f.name)}</b><span>${f.away ? 'moved away' : 'still there'}</span></div>
+      <div class="rl">${esc(f.role)} &middot; ${esc(f.place)}</div>
+      <div class="st ${k}">${esc(f.state)} &middot; ${word}</div>
+      <div class="pf">${f.platforms && f.platforms.length ? esc(f.platforms.join(', ')) : 'not on any platform'}</div>
+    </div>`;
+  }).join('');
+
+  const msgs = d.messages || [];
+  if (!msgs.length) {
+    $('ch-log').innerHTML = `<p class="chat-empty">Quiet so far. Break a story and
+      watch it arrive &mdash; whoever is on the fastest feed usually speaks first.</p>`;
+    return;
+  }
+  // Only repaint when something was actually said. Rebuilding the log every
+  // second resets the scroll position mid-read, which makes a live transcript
+  // impossible to actually read.
+  if (chatPainted === msgs.length) return;
+  chatPainted = msgs.length;
+  $('ch-log').innerHTML = msgs.map(m => `
+    <div class="msg ${m.via ? 'feed' : ''}">
+      <div class="t">t${m.tick}</div>
+      <div class="b"><b>${esc(m.from)}</b>${esc(m.text)}
+        ${m.via ? `<i>arrived via ${esc(m.via)} &mdash; the algorithm got there before their friends did</i>` : ''}</div>
+    </div>`).join('');
+  $('ch-log').scrollTop = $('ch-log').scrollHeight;
+}
+let chatPainted = -1;
+
+function refresh() { pollStats(); pollBreakdown(); pollSeries(); pollQuotes(); pollMedia(); }
 
 setInterval(pollState, 400);
 setInterval(pollStats, 1000);
@@ -797,8 +1092,11 @@ setInterval(pollSeries, 1500);
 setInterval(pollQuotes, 4000);
 setInterval(pollBreakdown, 3000);   // a full weighted scan of the population
 setInterval(pollExperiment, 1200);
+setInterval(pollMedia, 1200);
+setInterval(pollChat, 900);
 window.addEventListener('resize', pollSeries);
 
+setSpeed(1);
 load();
 refresh();
 pollRelay();

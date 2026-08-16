@@ -32,11 +32,20 @@ import (
 )
 
 type server struct {
-	mu        sync.Mutex
-	w         *world.World
-	s         *sim.Sim
-	cfg       sim.Config
-	running   bool
+	mu      sync.Mutex
+	w       *world.World
+	s       *sim.Sim
+	cfg     sim.Config
+	running bool
+
+	// speed multiplies the base tick interval; steps is a one-shot budget that
+	// lets a paused clock advance exactly n ticks. Both live under mu with the
+	// simulation itself, because a control that raced the tick loop could
+	// advance twice for one click and there would be no way to tell from the
+	// outside.
+	speed float64
+	steps int
+
 	lastEv    string
 	lastWhere string
 	story     reaction.Story
@@ -104,7 +113,7 @@ func main() {
 
 	srv := &server{w: w, s: s, cfg: cfg, running: *run,
 		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW,
-		exp: experiment.NewRunner()}
+		speed: 1, exp: experiment.NewRunner()}
 	if *gwURL != "" {
 		client := llm.New(*gwURL, *gwTok)
 		srv.relay = reaction.New(client, *model, *rxCache)
@@ -143,6 +152,8 @@ func main() {
 	mux.HandleFunc("/api/generate", srv.generate)
 	mux.HandleFunc("/api/reactions", srv.reactions)
 	mux.HandleFunc("/api/persona", srv.persona)
+	mux.HandleFunc("/api/media", srv.mediaStatus)
+	mux.HandleFunc("/api/chat", srv.chat)
 	mux.HandleFunc("/api/experiment", srv.experimentStatus)
 	mux.HandleFunc("/api/experiment/run", srv.experimentRun)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
@@ -280,8 +291,11 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 
 func (srv *server) control(rw http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Running *bool `json:"running"`
-		Reset   bool  `json:"reset"`
+		Running *bool    `json:"running"`
+		Reset   bool     `json:"reset"`
+		Speed   *float64 `json:"speed"`
+		Step    int      `json:"step"`
+		Media   *bool    `json:"media"`
 	}
 	json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&req)
 
@@ -289,17 +303,72 @@ func (srv *server) control(rw http.ResponseWriter, r *http.Request) {
 	if req.Running != nil {
 		srv.running = *req.Running
 	}
+	if req.Speed != nil {
+		srv.speed = math.Min(math.Max(*req.Speed, minSpeed), maxSpeed)
+	}
+	if req.Step > 0 {
+		// Bounded: an unbounded step count from a client is a way to ask the
+		// server to spend an hour inside the tick lock and stop answering.
+		srv.steps += min(req.Step, 100)
+	}
+	if req.Media != nil {
+		// Switching the media layer mid-run is deliberate and is the fastest
+		// honest A/B available in the UI: same world, same graph, same story,
+		// platforms on or off from this tick forward.
+		srv.s.M.SetEnabled(*req.Media)
+	}
 	if req.Reset {
 		// Same graph, fresh cascade and opinions. Rebuilding the network would
 		// cost seconds and change the thing under study.
 		srv.s.Reset(srv.cfg)
 		srv.lastEv = ""
+		srv.steps = 0
 	}
-	running := srv.running
+	running, speed, steps := srv.running, srv.speed, srv.steps
+	media := srv.s.M.Enabled()
 	srv.mu.Unlock()
 
-	rw.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(rw, `{"running":%v}`, running)
+	writeJSON(rw, map[string]any{
+		"running": running, "speed": speed, "pending_steps": steps, "media": media,
+	})
+}
+
+// mediaStatus reports what each platform is doing right now.
+func (srv *server) mediaStatus(rw http.ResponseWriter, r *http.Request) {
+	srv.mu.Lock()
+	on := srv.s.M.Enabled()
+	var stats []sim.PlatformStat
+	if srv.s.M != nil {
+		stats = srv.s.M.Stats(srv.w)
+	}
+	srv.mu.Unlock()
+	writeJSON(rw, map[string]any{"enabled": on, "platforms": stats})
+}
+
+// chat serves the six-person cohort: who they are and what they have said.
+func (srv *server) chat(rw http.ResponseWriter, r *http.Request) {
+	srv.mu.Lock()
+	c := srv.s.Chat
+	if c == nil {
+		srv.mu.Unlock()
+		writeJSON(rw, map[string]any{"available": false})
+		return
+	}
+	c.Refresh(srv.w, srv.s)
+	// Copy under the lock: these slices are mutated by the tick loop, and
+	// encoding them directly would race the writer for the whole of the JSON
+	// serialisation.
+	// Non-nil slices: an empty conversation must serialise as [] rather than
+	// null, or every client has to special-case "no messages yet".
+	friends := append(make([]sim.Friend, 0, len(c.Friends)), c.Friends...)
+	msgs := append(make([]sim.Message, 0, len(c.Messages)), c.Messages...)
+	origin := c.Origin
+	srv.mu.Unlock()
+
+	writeJSON(rw, map[string]any{
+		"available": true, "origin": origin,
+		"friends": friends, "messages": msgs,
+	})
 }
 
 func (srv *server) breakdown(rw http.ResponseWriter, r *http.Request) {

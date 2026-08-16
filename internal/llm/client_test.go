@@ -19,16 +19,16 @@ func TestLooksLikeTailnet(t *testing.T) {
 		want bool
 	}{
 		{"https://gateway.example.com", false},
-		{"http://100.101.102.103:8091", true},   // tailnet, inside the /10
-		{"http://100.127.255.254:8091", true},   // top of the /10
-		{"http://100.64.0.0:8091", true},        // first address of the /10
-		{"http://100.63.255.255:8091", false},   // one below: public
-		{"http://100.128.0.1:8091", false},      // one above: public
-		{"http://100.1.2.3:8091", false},        // public 100/8
-		{"http://dgx-spark-k3:8091", true},      // bare name: MagicDNS only
-		{"http://127.0.0.1:8091", false},        // same host: always routable
-		{"http://localhost:8091", false},        // same host, by name
-		{"http://192.168.1.10:8091", false},     // same LAN: legitimate
+		{"http://100.101.102.103:8091", true}, // tailnet, inside the /10
+		{"http://100.127.255.254:8091", true}, // top of the /10
+		{"http://100.64.0.0:8091", true},      // first address of the /10
+		{"http://100.63.255.255:8091", false}, // one below: public
+		{"http://100.128.0.1:8091", false},    // one above: public
+		{"http://100.1.2.3:8091", false},      // public 100/8
+		{"http://dgx-spark-k3:8091", true},    // bare name: MagicDNS only
+		{"http://127.0.0.1:8091", false},      // same host: always routable
+		{"http://localhost:8091", false},      // same host, by name
+		{"http://192.168.1.10:8091", false},   // same LAN: legitimate
 		{"http://10.0.0.5:8091", false},
 		{"http://[::1]:8091", false},
 		{"https://populace-production.up.railway.app", false},

@@ -6,12 +6,96 @@ content and a Go engine doing the per-capita work.
 
 **Plan:** https://claude.ai/code/artifact/cb3b3c4a-f91b-4a80-b24c-f2afbf6f5a7c
 
-## Status — phase 6
+## Status — phase 7
 
 Grounded personas, a social network over them, opinion dynamics and contagion,
-a language model writing what each kind of person makes of the news, a paired
-experiment runner for testing claims about any of it, and an instrument panel
-that shows all of it while it runs.
+a media layer of ranked feeds on top of both, a language model writing what each
+kind of person makes of the news, a paired experiment runner for testing claims
+about any of it, and an instrument panel that shows all of it while it runs.
+
+Three views of the same simulation, switchable with 1/2/3:
+
+| view | what it is for |
+|---|---|
+| **Globe** | the world at once. Drag to turn, wheel to zoom, click anyone |
+| **Map** | the same points under an equirectangular projection, morphed continuously so a cascade stays followable while the world unrolls |
+| **Group chat** | six people who grew up in the same place, whose messages are produced by their own state in the running simulation |
+
+Time is a transport: space plays and pauses, `→` steps one tick while paused,
+and the speed dial runs 0.25× to 8×. There is deliberately no step *back* —
+see "what is not here".
+
+## The media layer
+
+Peer ties spread behaviour; ranked feeds are a structurally different channel,
+and two properties make them different in ways that change outcomes rather than
+just speed.
+
+**Amplification.** A chronological feed shows a fair sample of what is
+circulating, so the chance a slot is about your story is just the engagement
+rate `e`. Ranking by predicted engagement over-samples the tail, modelled as
+`e^(1/(1+Amplify))` — at `Amplify = 0` the exponent is 1 and the feed is fair;
+at 3.4 it is 0.23, so a story circulating among 0.1% of users occupies 21% of
+feed slots. The limits are right: as `e → 1` all curves meet, because a feed
+cannot over-represent something everybody is already posting. Amplification
+helps the obscure, not the universal.
+
+What that buys is not "everything spreads" — it is a **critical mass that
+moves**. Measured over 60k personas, scattered seeding:
+
+| seeded | platforms off | platforms on |
+|---|---|---|
+| 0.4% | 0.46% | 0.53% |
+| **1.2%** | **4.12%** | **99.91%** |
+| 1.6% | 99.76% | 99.94% |
+
+Below the new threshold platforms barely help; above the old one they are
+irrelevant; in between they decide the outcome. A closed channel with no ranking
+function does not do this at all, which is the control that separates
+"platforms" from "amplification".
+
+Feed confirmations are **not** counted as independent evidence. Content selected
+by one ranking function out of one pool is correlated, so `shown` posts are worth
+`0.9·√shown` confirmations, capped at 4. Without that discount the first version
+of this layer turned every story into a global cascade and erased the tipping
+point entirely.
+
+**Sorting** is the echo chamber, and the honest observable is the *peak* of
+opinion variance rather than its endpoint. Friedkin-Johnsen has a unique fixed
+point; the feed is not in it. Once a story burns out, presence goes to zero and
+the population relaxes to exactly where it would have been. So a sorted feed
+cannot move the equilibrium — it holds people apart while the story is live.
+Measured: peak variance rises 1.57× from chronological to echo-chamber feeds,
+and final variance is identical to six decimal places.
+
+## The group chat
+
+Six people who grew up in one place — four still there, two moved abroad — with
+a shared chat. Every line traces to a state transition: somebody adopted,
+somebody's opinion crossed zero, somebody was reached by a feed. Nothing is
+authored for mood.
+
+It exists as an audit. Every number above it is an aggregate over a population,
+and an aggregate can look reasonable while the mechanism under it is wrong. If
+reach says 99% and nobody in the chat has heard, one of the two is lying and the
+chat is the one you can check by reading. A real transcript from a run:
+
+```
+t19  Vikram   catching up on this now              (Lahore — moved away)
+t24  Paula    anyone else seen this                (Brasilia — moved away)
+t24  Yuna     did you all see this. not great      (Guangzhou)
+t25  Chen     just heard about this                (Guangzhou)
+t28  Ling     ok I'm done with this topic
+```
+
+The two who left hear first, because they sit in different media environments.
+That is the reason the cohort is not six people in one city.
+
+## What is not here, and why
+
+**Step back.** Rewinding needs a stored copy of every persona per tick: 20 MB a
+tick at a million people, 3.6 GB for the 1800-tick history the charts already
+keep. The charts are the record of what happened; the world only moves forward.
 
 Runs unattended under systemd `--user` units — see `deploy/install-units.sh`.
 
@@ -71,8 +155,10 @@ internal/world/     SoA population, stratified sampling, packing
   place.go          weighted population centres (stands in for a GHS-POP raster)
 internal/sim/       the dynamics
   graph.go          CSR social network, spatial order, degree tail
-  opinion.go        Friedkin-Johnsen influence
+  opinion.go        Friedkin-Johnsen influence, feed-blended social input
   contagion.go      threshold adoption, seeding strategies, attention decay
+  media.go          platforms, engagement ranking, amplification, sorting
+  cohort.go         the six-person group chat
   sim.go            tick loop, event injection, adaptive state frames
 internal/gateway/   admission control, lanes, response cache, rate limits
 internal/llm/       client used from Railway, over the tailnet

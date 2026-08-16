@@ -91,28 +91,69 @@ func NewOpinion(w *world.World, topicSeed uint64) *Opinion {
 // values and some old ones, depending entirely on which goroutine ran first.
 // That converges too -- often faster -- but it is not the model, and it makes
 // the result depend on the scheduler. Two runs of the same seed would differ.
-func (o *Opinion) Step(g *Graph) float64 {
+func (o *Opinion) Step(g *Graph) float64 { return o.StepWith(g, nil, nil) }
+
+// StepWith runs one round, optionally blending in what each agent's feeds are
+// showing them. m == nil is peer ties only and is exactly the pre-media model.
+//
+// The social input term becomes a weighted blend of two sources:
+//
+//	social_i = (1−φ_i)·mean(peer ties)  +  φ_i·(what the feeds show)
+//
+// with φ_i derived from how much platform attention that person is exposed to.
+// The FJ structure is untouched -- λ_i still trades social input against the
+// stubborn prior, and the update is still a contraction, so it still has a
+// unique fixed point. What changes is *what counts as social input*, which is
+// the honest place to put a media effect: platforms do not make people more
+// suggestible, they change who the suggestible are listening to.
+//
+// The polarising effect is not written here. It falls out of Media.FeedPull,
+// where a sorted feed returns something close to the reader's own position --
+// so the social term stops pulling them anywhere and their prior wins.
+func (o *Opinion) StepWith(g *Graph, m *Media, w *world.World) float64 {
+	useMedia := m.Enabled() && w != nil
 	partial := make([]float64, numWorkers(len(o.Y)))
 	parallelIdx(len(o.Y), func(c, lo, hi int) {
 		local := 0.0
 		for i := lo; i < hi; i++ {
 			nb := g.Neighbours(i)
 			y := o.Y[i]
-			if len(nb) == 0 {
+
+			var social float32
+			var haveSocial bool
+			if len(nb) > 0 {
+				// Uniform weights: W is row-stochastic by construction, which
+				// is what FJ requires. Non-uniform tie strengths would go here,
+				// and would need renormalising per row rather than per edge.
+				var sum float32
+				for _, j := range nb {
+					sum += o.Y[j]
+				}
+				social = sum / float32(len(nb))
+				haveSocial = true
+			}
+
+			if useMedia {
+				if fm, fw := m.FeedPull(w, o, i); fw > 0 {
+					// phi saturates rather than growing without bound: even a
+					// person living entirely online still talks to somebody, and
+					// a feed weight that can exceed 1 would let the platform term
+					// overwrite the peer term outright.
+					phi := float32(fw / (fw + 1.2))
+					if !haveSocial {
+						social, haveSocial = float32(fm), true
+					} else {
+						social = (1-phi)*social + phi*float32(fm)
+					}
+				}
+			}
+			if !haveSocial {
 				o.next[i] = y
 				continue
 			}
-			// Uniform weights: W is row-stochastic by construction, which is
-			// what FJ requires. Non-uniform tie strengths would go here, and
-			// would need renormalising per row rather than per edge.
-			var sum float32
-			for _, j := range nb {
-				sum += o.Y[j]
-			}
-			avg := sum / float32(len(nb))
 
 			lam := o.Lambda[i]
-			nv := lam*avg + (1-lam)*o.Prior[i]
+			nv := lam*social + (1-lam)*o.Prior[i]
 			o.next[i] = nv
 			if d := math.Abs(float64(nv - y)); d > local {
 				local = d

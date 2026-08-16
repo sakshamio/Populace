@@ -20,6 +20,11 @@ type Sim struct {
 	G *Graph
 	O *Opinion
 	C *Contagion
+	M *Media
+
+	// Chat is six named people whose messages come out of their own state. It
+	// is the readable cross-check on every aggregate above it.
+	Chat *Cohort
 
 	Tick int
 
@@ -56,6 +61,11 @@ type Config struct {
 	Graph     GraphConfig
 	Contagion ContagionConfig
 	TopicSeed uint64
+
+	// Platforms is the media layer. Empty means no platforms at all, which is
+	// the pre-media model and the control arm for every claim about them.
+	Platforms []Platform
+	MediaSeed uint64
 }
 
 func DefaultConfig() Config {
@@ -63,6 +73,8 @@ func DefaultConfig() Config {
 		Graph:     DefaultGraphConfig(),
 		Contagion: DefaultContagionConfig(),
 		TopicSeed: 0x70B1C5EED,
+		Platforms: DefaultPlatforms(),
+		MediaSeed: 0xFEED5,
 	}
 }
 
@@ -75,6 +87,10 @@ func New(w *world.World, cfg Config) *Sim {
 		inDirty: make([]bool, w.N),
 		lastFl:  make([]uint16, w.N),
 	}
+	if len(cfg.Platforms) > 0 {
+		s.M = NewMedia(w, cfg.Platforms, cfg.MediaSeed)
+	}
+	s.Chat = NewCohort(w, s.G, s.M, cfg.TopicSeed^0xC0FFEE)
 	s.settle()
 	s.packAll()
 	return s
@@ -185,6 +201,11 @@ func (s *Sim) Inject(ev Event) []int32 {
 		r := newRNG(ev.Seed^0x9111, 1)
 		seeded = s.C.SeedRegion(s.G, int32(r.u32()%uint32(s.W.N)), size)
 	}
+	// Platforms pick the story up at the same moment the broadcasters do.
+	if s.M.Enabled() {
+		s.M.Ignite(ev.Salience)
+	}
+
 	s.baseOpinion = s.O.Mean(s.W)
 	s.baseNeg, s.basePos = s.O.Polarisation(s.W, 0.35)
 	s.captureBaseline()
@@ -219,11 +240,21 @@ func (s *Sim) denseStart(seed uint64) int32 {
 // point every tick. Settling would make opinion instantaneous relative to
 // news, which is backwards: the interesting regime is the one where a story
 // spreads faster than people finish arguing about it.
+// Order within the tick is deliberate: the media layer reads the state left by
+// the previous tick, contagion consumes that exposure, and opinion moves last
+// on the result. Running media after contagion would let a story be amplified
+// by adoptions it had not caused yet, which reads as the algorithm predicting
+// the future.
 func (s *Sim) Advance() (newAdopters int, opinionDelta float64) {
 	t0 := time.Now()
-	newAdopters = s.C.Advance(s.G)
-	opinionDelta = s.O.Step(s.G)
+	var shown []uint8
+	if s.M.Enabled() {
+		shown = s.M.Advance(s.W, s.C, s.O)
+	}
+	newAdopters = s.C.AdvanceWith(s.G, shown)
+	opinionDelta = s.O.StepWith(s.G, s.M, s.W)
 	s.Tick++
+	s.Chat.Observe(s)
 	s.repack()
 
 	ms := float64(time.Since(t0).Microseconds()) / 1000
@@ -241,24 +272,46 @@ func (s *Sim) Advance() (newAdopters int, opinionDelta float64) {
 //	bits 0-1  adoption state
 //	bits 2-7  opinion, quantised to 6 bits over [-1, 1]
 //	bit  8    broadcaster
+//	bit  9    adopted because the feed made up the difference
+//	bit 10    the feed reached this person this tick
 //
 // Six bits of opinion is 64 levels, which is finer than the eye can read off a
 // four-pixel sprite. Spending more of the word on precision nobody can see
 // would cost bandwidth on the delta stream, which is the actual constraint.
-func packFlags(state uint8, y float32, media bool) uint16 {
+//
+// Bits 9 and 10 exist so algorithmic reach is *visible* rather than merely
+// counted. Peer spread and feed spread produce the same adoption state, and
+// rendering them identically would hide the one thing the media layer is
+// supposed to demonstrate.
+func packFlags(state uint8, y float32, media, feedDriven, feedNow bool) uint16 {
 	q := uint16((clampF(float64(y), -1, 1) + 1) * 0.5 * 63)
 	f := uint16(state&0x3) | q<<2
 	if media {
 		f |= 1 << 8
 	}
+	if feedDriven {
+		f |= 1 << 9
+	}
+	if feedNow {
+		f |= 1 << 10
+	}
 	return f
+}
+
+// flagsFor is the single place the packing inputs are gathered, so packAll and
+// repack cannot drift apart -- they did once, and a flag set in one path and
+// not the other is invisible until the delta stream disagrees with a full frame.
+func (s *Sim) flagsFor(i int) uint16 {
+	feedDriven := s.C.FeedDriven != nil && s.C.FeedDriven[i]
+	feedNow := s.M.Enabled() && s.M.Exposed[i]
+	return packFlags(s.C.State[i], s.O.Y[i],
+		world.Stratum(s.W.Strat[i]) == world.Media, feedDriven, feedNow)
 }
 
 func (s *Sim) packAll() {
 	parallel(s.W.N, func(lo, hi int) {
 		for i := lo; i < hi; i++ {
-			f := packFlags(s.C.State[i], s.O.Y[i],
-				world.Stratum(s.W.Strat[i]) == world.Media)
+			f := s.flagsFor(i)
 			s.W.Flags[i] = f
 			s.lastFl[i] = f
 		}
@@ -282,8 +335,7 @@ func (s *Sim) resync() {
 // the lock. The scan itself is memory-bound and cheap.
 func (s *Sim) repack() {
 	for i := 0; i < s.W.N; i++ {
-		f := packFlags(s.C.State[i], s.O.Y[i],
-			world.Stratum(s.W.Strat[i]) == world.Media)
+		f := s.flagsFor(i)
 		s.W.Flags[i] = f
 		if f != s.lastFl[i] && !s.inDirty[i] {
 			s.inDirty[i] = true
@@ -395,6 +447,13 @@ type Snapshot struct {
 	NegShare float64     `json:"share_against"`
 	PosShare float64     `json:"share_for"`
 	Degree   DegreeStats `json:"degree"`
+
+	// FeedShare is the share of adopters who needed the feed to get there, and
+	// FeedReached how many the feed touched this tick. Together they are the
+	// media layer's claim about itself, stated in a form that can be false.
+	MediaOn     bool    `json:"media_on"`
+	FeedShare   float64 `json:"feed_share"`
+	FeedReached int     `json:"feed_reached"`
 }
 
 func (s *Sim) Snapshot(withDegree bool) Snapshot {
@@ -413,6 +472,10 @@ func (s *Sim) Snapshot(withDegree bool) Snapshot {
 		OpinionShift: s.O.Mean(s.W) - s.baseOpinion,
 		NegShift:     neg - s.baseNeg,
 		PosShift:     pos - s.basePos,
+
+		MediaOn:     s.M.Enabled(),
+		FeedShare:   s.C.FeedShare(s.W),
+		FeedReached: s.M.ExposedCount(),
 	}
 	if withDegree {
 		sn.Degree = s.G.DegreeStats(s.W)
@@ -425,6 +488,8 @@ func (s *Sim) Snapshot(withDegree bool) Snapshot {
 // the right shape for comparing two events or two seeding strategies.
 func (s *Sim) Reset(cfg Config) {
 	s.C.Reset()
+	s.M.Reset()
+	s.Chat.Reset()
 	s.O = NewOpinion(s.W, cfg.TopicSeed)
 	s.settle()
 	s.Tick = 0

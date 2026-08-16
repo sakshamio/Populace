@@ -1,8 +1,8 @@
-// WebGL2 globe. One draw call for the entire population.
+// WebGL2 renderer. One draw call for the entire population.
 //
 // The instance buffer arrives from Go as packed binary and goes straight into
 // a GPU buffer -- no JSON, no parse, no garbage. Positions are uploaded once
-// and never move again; the only buffer that changes per tick is one byte of
+// and never move again; the only buffer that changes per tick is two bytes of
 // state per persona.
 //
 // Layout must match internal/world.InstanceBytes exactly:
@@ -12,38 +12,63 @@ const STRIDE = 16;
 
 // The flags word is unpacked on the GPU, not in JS. It arrives from Go in the
 // layout internal/sim.packFlags writes:
-//   bits 0-1 adoption state, bits 2-7 opinion (64 levels), bit 8 broadcaster.
+//   bits 0-1 adoption state, bits 2-7 opinion (64 levels), bit 8 broadcaster,
+//   bit 9 feed-driven adopter, bit 10 reached by a feed this tick.
 // Unpacking ten million of these per tick in JavaScript would cost more than
-// the simulation tick that produced them; here it is three integer ops in a
+// the simulation tick that produced them; here it is four integer ops in a
 // shader that was going to run anyway.
+//
+// The projection is a morph rather than two programs. Globe and map are the
+// same points under a different mapping, and interpolating between them in the
+// vertex shader means the transition is continuous -- you can watch a cascade
+// keep spreading while the world unrolls underneath it. Two separate views
+// would cut to a new frame and lose the thing being followed.
 const VS = `#version 300 es
 layout(location=0) in vec2 a_ll;      // lon, lat in radians
 layout(location=1) in uint a_flags;   // packed state, see internal/sim
-uniform float u_rot, u_radius;
-uniform vec2  u_res;
+uniform float u_rot, u_radius, u_morph, u_zoom, u_mapy;
+uniform vec2  u_res, u_pan;
 uniform float u_size;
-out float v_state, v_op, v_media, v_face;
+out float v_state, v_op, v_media, v_face, v_feed, v_fresh;
+const float PI = 3.14159265359;
 void main(){
   float lon = a_ll.x + u_rot;
+  // Wrap into [-PI, PI] so the map does not smear a seam of points across the
+  // whole width as the rotation accumulates.
+  lon = mod(lon + PI, 2.0*PI) - PI;
   float lat = a_ll.y;
   float cl  = cos(lat);
-  vec3  p   = vec3(cl*sin(lon), sin(lat), cl*cos(lon));
-  v_face  = p.z;                       // >0 faces the viewer
+
+  vec3  sp   = vec3(cl*sin(lon), sin(lat), cl*cos(lon));
+  vec2  sNDC = sp.xy * u_radius / (u_res*0.5);
+  vec2  mNDC = vec2(lon/PI * 0.92, lat/(PI*0.5) * u_mapy);
+
+  vec2 ndc = mix(sNDC, mNDC, u_morph);
+  // The far hemisphere is culled on the globe and must not be on the map,
+  // where every point faces the viewer. Interpolating the facing term with the
+  // projection is what keeps the back of the world fading in as it unrolls
+  // instead of popping.
+  v_face  = mix(sp.z, 1.0, u_morph);
+
   v_state = float(a_flags & 3u);
   v_op    = float((a_flags >> 2) & 63u) / 63.0 * 2.0 - 1.0;
-  v_media = ((a_flags & 256u) != 0u) ? 1.0 : 0.0;
-  gl_Position  = vec4(p.xy * u_radius / (u_res*0.5), 0.0, 1.0);
-  gl_PointSize = u_size + v_media * 1.6;
+  v_media = ((a_flags & 256u)  != 0u) ? 1.0 : 0.0;
+  v_feed  = ((a_flags & 512u)  != 0u) ? 1.0 : 0.0;
+  v_fresh = ((a_flags & 1024u) != 0u) ? 1.0 : 0.0;
+
+  gl_Position  = vec4(ndc * u_zoom + u_pan, 0.0, 1.0);
+  gl_PointSize = (u_size + v_media * 1.6) * max(1.0, u_zoom * 0.75);
 }`;
 
-// Two channels in one dot, which is the whole reason opinion and adoption are
+// Three channels in one dot, which is why opinion, adoption, and channel are
 // separate fields rather than one "activated" bit: hue carries which way a
-// person leans, brightness carries whether the story has reached them. A
+// person leans, brightness carries whether the story has reached them, and a
+// warm rim marks the ones the algorithm reached rather than their friends. A
 // population can be uniformly aware and completely split, and that is exactly
 // the state worth being able to see.
 const FS = `#version 300 es
 precision highp float;
-in float v_state, v_op, v_media, v_face;
+in float v_state, v_op, v_media, v_face, v_feed, v_fresh;
 out vec4 o;
 void main(){
   if (v_face <= 0.02) discard;         // backface cull: one dot product
@@ -60,24 +85,41 @@ void main(){
   else if (v_state > 0.5) lum = 1.35;  // actively transmitting
   if (v_media > 0.5) lum *= 1.4;
 
+  // Feed-driven adopters are tinted toward the algorithmic colour. Peer spread
+  // and feed spread produce identical adoption states, so without this the one
+  // thing the media layer demonstrates is invisible on the thing it changed.
+  if (v_feed > 0.5)  c = mix(c, vec3(0.78,0.35,0.72), 0.55);
+  if (v_fresh > 0.5) lum *= 1.9;       // touched by a feed on this very tick
+
   o = vec4(c * lum * (0.42 + 0.58*v_face), 1.0);
 }`;
 
 const BODY_VS = `#version 300 es
 layout(location=0) in vec2 a_p;
-uniform float u_radius; uniform vec2 u_res;
+uniform float u_radius, u_morph, u_zoom, u_mapy; uniform vec2 u_res, u_pan;
 out vec2 v_p;
-void main(){ v_p=a_p; gl_Position=vec4(a_p*u_radius/(u_res*0.5),0.0,1.0); }`;
+void main(){
+  v_p = a_p;
+  vec2 sNDC = a_p * u_radius / (u_res*0.5);
+  vec2 mNDC = vec2(a_p.x * 0.92, a_p.y * u_mapy);
+  gl_Position = vec4(mix(sNDC, mNDC, u_morph) * u_zoom + u_pan, 0.0, 1.0);
+}`;
 
 const BODY_FS = `#version 300 es
 precision highp float;
 in vec2 v_p; out vec4 o;
+uniform float u_morph;
 void main(){
   float d = length(v_p);
-  if (d > 1.0) discard;
-  float z = sqrt(max(0.0, 1.0 - d*d));
+  // The sphere is a lit disc; the map is a flat plate. Crossfading the two
+  // shadings rather than switching keeps the ground continuous through the
+  // morph, which is the only reason the transition reads as one object.
+  if (d > 1.0 && u_morph < 0.5) discard;
+  float z = sqrt(max(0.0, 1.0 - min(d*d, 1.0)));
   float lam = clamp(dot(normalize(vec3(v_p,z)), normalize(vec3(-0.35,0.25,0.9))), 0.0, 1.0);
-  o = vec4(mix(vec3(0.055,0.07,0.10), vec3(0.10,0.13,0.19), lam), 1.0);
+  vec3 globe = mix(vec3(0.055,0.07,0.10), vec3(0.10,0.13,0.19), lam);
+  vec3 plate = vec3(0.062,0.079,0.112);
+  o = vec4(mix(globe, plate, u_morph), 1.0);
 }`;
 
 function compile(gl, type, src) {
@@ -101,6 +143,15 @@ function link(gl, vs, fs) {
   return p;
 }
 
+// Uniform locations are looked up once and cached. getUniformLocation is a
+// string lookup into the driver; calling it six times per uniform per frame
+// showed up as a measurable cost at 60fps long before the draw call did.
+function uniforms(gl, prog, names) {
+  const u = {};
+  for (const n of names) u[n] = gl.getUniformLocation(prog, n);
+  return u;
+}
+
 export class Globe {
   constructor(canvas, onStats) {
     this.cv = canvas;
@@ -111,6 +162,10 @@ export class Globe {
 
     this.pPts = link(gl, VS, FS);
     this.pBody = link(gl, BODY_VS, BODY_FS);
+    this.uPts = uniforms(gl, this.pPts,
+      ['u_rot','u_radius','u_res','u_size','u_morph','u_zoom','u_pan','u_mapy']);
+    this.uBody = uniforms(gl, this.pBody,
+      ['u_radius','u_res','u_morph','u_zoom','u_pan','u_mapy']);
 
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -130,10 +185,67 @@ export class Globe {
     this.fps = 60;
     this.reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+    // View state. morph 0 = globe, 1 = map; morphTo is the target and the two
+    // are eased together each frame.
+    this.morph = 0;
+    this.morphTo = 0;
+    this.zoom = 1;
+    this.pan = [0, 0];
+    this.spin = !this.reduce;
+
     this._resize = this.resize.bind(this);
     window.addEventListener('resize', this._resize);
     this.resize();
+    this.bindPointer();
   }
+
+  // Drag to turn the world, wheel to zoom. Dragging sets spin off, because a
+  // world that keeps rotating out from under the cursor after you have grabbed
+  // it is the single most irritating thing a globe can do.
+  bindPointer() {
+    const cv = this.cv;
+    let down = false, lastX = 0, lastY = 0, moved = 0;
+
+    cv.addEventListener('pointerdown', (e) => {
+      down = true; moved = 0;
+      lastX = e.clientX; lastY = e.clientY;
+      cv.setPointerCapture(e.pointerId);
+      this.spin = false;
+    });
+    cv.addEventListener('pointermove', (e) => {
+      if (!down) return;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      moved += Math.abs(dx) + Math.abs(dy);
+      this.rot += dx * 0.005;
+      // Vertical drag pans rather than tilts. Tilting would need a full camera
+      // and a matrix; panning gives the same "look at another part" affordance
+      // for two lines, and on the map it is the only thing that makes sense.
+      this.pan[1] = Math.max(-1.2, Math.min(1.2, this.pan[1] - dy * 0.002 * this.zoom));
+    });
+    const end = (e) => {
+      if (!down) return;
+      down = false;
+      try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+      // A drag is not a click. Without this threshold every attempt to turn
+      // the globe also opens the inspector on whoever was under the finger
+      // when it stopped.
+      this.suppressClick = moved > 6;
+    };
+    cv.addEventListener('pointerup', end);
+    cv.addEventListener('pointercancel', end);
+
+    cv.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const k = Math.exp(-e.deltaY * 0.0016);
+      this.zoom = Math.max(1, Math.min(14, this.zoom * k));
+      if (this.zoom === 1) this.pan = [0, 0];
+    }, { passive: false });
+  }
+
+  setView(v) { this.morphTo = v === 'map' ? 1 : 0; }
+  setSpin(on) { this.spin = on && !this.reduce; }
+  resetView() { this.zoom = 1; this.pan = [0, 0]; this.rot = 0; }
 
   // Takes the raw ArrayBuffer from /api/instances. The position attribute is
   // read directly out of the packed record with a stride -- the bytes are
@@ -162,6 +274,15 @@ export class Globe {
     this.bState = this.bState || gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bState);
     gl.bufferData(gl.ARRAY_BUFFER, this.flags, gl.DYNAMIC_DRAW);
+
+    // Positions are kept in JS as well, but only so picking can search them.
+    // Read out of the same bytes rather than copied per field.
+    this.ll = new Float32Array(n * 2);
+    const src = new DataView(body);
+    for (let i = 0; i < n; i++) {
+      this.ll[i * 2]     = src.getFloat32(i * STRIDE, true);
+      this.ll[i * 2 + 1] = src.getFloat32(i * STRIDE + 4, true);
+    }
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -206,30 +327,39 @@ export class Globe {
     return count;
   }
 
-  // Turns a click into a point on the sphere, or null if it missed.
+  // Turns a click into a point on the world, or null if it missed.
   //
-  // This inverts the vertex shader exactly rather than approximating it. The
-  // shader maps a unit-sphere point p to NDC as p.xy * R / (res/2), so the
-  // inverse is p.xy = ndc * (res/2) / R, and z falls out of the unit-length
-  // constraint -- taking the positive root because the far hemisphere is
-  // discarded by the same backface test the fragment shader uses.
-  //
-  // Keeping this in lockstep with the shader matters: an approximate
-  // unprojection would return a person a few degrees from the one under the
-  // cursor, which reads as the inspector being wrong about who lives where.
+  // This inverts the vertex shader exactly rather than approximating it, in
+  // whichever projection is currently on screen. Keeping it in lockstep with
+  // the shader matters: an approximate unprojection would return a person a few
+  // degrees from the one under the cursor, which reads as the inspector being
+  // wrong about who lives where.
   pick(clientX, clientY) {
     const rect = this.cv.getBoundingClientRect();
-    const ndcx = ((clientX - rect.left) / rect.width) * 2 - 1;
-    const ndcy = 1 - ((clientY - rect.top) / rect.height) * 2;
+    let ndcx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    let ndcy = 1 - ((clientY - rect.top) / rect.height) * 2;
 
-    const px = ndcx * (this.W * 0.5) / this.R;
-    const py = ndcy * (this.H * 0.5) / this.R;
-    const r2 = px * px + py * py;
-    if (r2 > 1) return null;                  // clicked past the limb
-    const pz = Math.sqrt(1 - r2);
+    // Undo pan and zoom first; both are applied last in the shader.
+    ndcx = (ndcx - this.pan[0]) / this.zoom;
+    ndcy = (ndcy - this.pan[1]) / this.zoom;
 
-    const lat = Math.asin(py);
-    let lon = Math.atan2(px, pz) - this.rot;  // undo the spin
+    let lon, lat;
+    if (this.morph > 0.5) {
+      const x = ndcx / 0.92;
+      const y = ndcy / this.mapY;
+      if (Math.abs(x) > 1 || Math.abs(y) > 1) return null;
+      lon = x * Math.PI;
+      lat = y * Math.PI * 0.5;
+    } else {
+      const px = ndcx * (this.W * 0.5) / this.R;
+      const py = ndcy * (this.H * 0.5) / this.R;
+      const r2 = px * px + py * py;
+      if (r2 > 1) return null;                  // clicked past the limb
+      const pz = Math.sqrt(1 - r2);
+      lat = Math.asin(py);
+      lon = Math.atan2(px, pz);
+    }
+    lon -= this.rot;                            // undo the spin
     lon = ((lon + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
     return { lon, lat };
   }
@@ -242,6 +372,9 @@ export class Globe {
     this.cv.width = this.W;
     this.cv.height = this.H;
     this.R = Math.min(this.W, this.H) * 0.44;
+    // Map half-height in NDC that preserves the 2:1 plate carree aspect against
+    // whatever shape the window happens to be.
+    this.mapY = 0.46 * this.W / this.H;
     gl.viewport(0, 0, this.W, this.H);
   }
 
@@ -250,7 +383,17 @@ export class Globe {
     let last = performance.now();
     const frame = (t) => {
       const dt = Math.min(64, t - last); last = t;
-      if (!this.reduce) this.rot += dt * 0.00007;
+
+      // Ease the projection rather than snapping. The easing constant is framed
+      // against dt so the transition takes the same wall-clock time on a 144Hz
+      // display as on a 60Hz one.
+      if (this.morph !== this.morphTo) {
+        const k = 1 - Math.exp(-dt / 190);
+        this.morph += (this.morphTo - this.morph) * k;
+        if (Math.abs(this.morphTo - this.morph) < 0.001) this.morph = this.morphTo;
+      }
+      if (this.spin && this.morph < 0.5) this.rot += dt * 0.00007;
+
       if (this.dirty) {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bState);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.flags);
@@ -262,19 +405,27 @@ export class Globe {
 
       gl.useProgram(this.pBody);
       gl.bindVertexArray(this.vaoBody);
-      gl.uniform1f(gl.getUniformLocation(this.pBody, 'u_radius'), this.R);
-      gl.uniform2f(gl.getUniformLocation(this.pBody, 'u_res'), this.W, this.H);
+      gl.uniform1f(this.uBody.u_radius, this.R);
+      gl.uniform2f(this.uBody.u_res, this.W, this.H);
+      gl.uniform1f(this.uBody.u_morph, this.morph);
+      gl.uniform1f(this.uBody.u_zoom, this.zoom);
+      gl.uniform1f(this.uBody.u_mapy, this.mapY);
+      gl.uniform2f(this.uBody.u_pan, this.pan[0], this.pan[1]);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
       if (this.n) {
         gl.useProgram(this.pPts);
         gl.bindVertexArray(this.vao);
-        gl.uniform1f(gl.getUniformLocation(this.pPts, 'u_rot'), this.rot);
-        gl.uniform1f(gl.getUniformLocation(this.pPts, 'u_radius'), this.R);
-        gl.uniform2f(gl.getUniformLocation(this.pPts, 'u_res'), this.W, this.H);
+        gl.uniform1f(this.uPts.u_rot, this.rot);
+        gl.uniform1f(this.uPts.u_radius, this.R);
+        gl.uniform2f(this.uPts.u_res, this.W, this.H);
+        gl.uniform1f(this.uPts.u_morph, this.morph);
+        gl.uniform1f(this.uPts.u_zoom, this.zoom);
+        gl.uniform1f(this.uPts.u_mapy, this.mapY);
+        gl.uniform2f(this.uPts.u_pan, this.pan[0], this.pan[1]);
         // Thin the point size as population rises so a dense globe does not
         // saturate to a solid disc.
-        gl.uniform1f(gl.getUniformLocation(this.pPts, 'u_size'),
+        gl.uniform1f(this.uPts.u_size,
           this.n > 4e6 ? 1.0 : this.n > 1e6 ? 1.3 : 1.7);
         gl.drawArrays(gl.POINTS, 0, this.n);   // the whole world, one call
       }

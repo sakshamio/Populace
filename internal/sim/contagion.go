@@ -71,6 +71,12 @@ type Contagion struct {
 	Simple bool
 	Beta   float64
 
+	// FeedDriven marks adopters who would not have cleared their threshold on
+	// peer confirmations alone. This is the attribution that makes the media
+	// layer falsifiable: without it, a run with platforms on and a run with
+	// them off differ by a number nobody can decompose.
+	FeedDriven []bool
+
 	Seed uint64
 	next []uint8
 
@@ -146,16 +152,33 @@ func NewContagion(w *world.World, cfg ContagionConfig) *Contagion {
 	return c
 }
 
-// Advance runs one round and reports how many newly adopted.
+// Advance runs one round over peer ties alone and reports how many newly
+// adopted. This is the pre-media model and remains the definition of it.
+func (c *Contagion) Advance(g *Graph) int { return c.AdvanceWith(g, nil) }
+
+// AdvanceWith runs one round, optionally counting confirmations the media layer
+// delivered. shown[i] is how many apparent adopters person i's feeds put in
+// front of them this tick; nil means peer ties only.
+//
+// Feed confirmations are added to peer confirmations rather than evaluated
+// against a separate rule, and that is the modelling claim: a threshold is
+// about how much corroboration a person has seen, not about which channel
+// carried it. The claim is contestable -- a stranger on a feed is plainly not a
+// neighbour -- which is exactly why the two are counted separately in
+// FeedDriven and rendered differently, so the contribution stays visible
+// instead of disappearing into a single number.
 //
 // Synchronous, like the opinion update and for the same reason: a node that
 // adopts this round must not transmit until the next one. Updating in place
 // would let a cascade travel an unbounded distance in a single tick, at a
 // speed set by memory layout.
-func (c *Contagion) Advance(g *Graph) int {
+func (c *Contagion) AdvanceWith(g *Graph, shown []uint8) int {
 	scale := c.ThresholdScale
 	if scale <= 0 {
 		scale = 1
+	}
+	if c.FeedDriven == nil || len(c.FeedDriven) != len(c.State) {
+		c.FeedDriven = make([]bool, len(c.State))
 	}
 	copy(c.next, c.State)
 	counts := make([]int, numWorkers(len(c.State)))
@@ -167,16 +190,26 @@ func (c *Contagion) Advance(g *Graph) int {
 				continue
 			}
 			nb := g.Neighbours(i)
-			if len(nb) == 0 {
-				continue
-			}
-			exposed := 0
+			peer := 0
 			for _, j := range nb {
 				if c.State[j] == Adopted {
-					exposed++
+					peer++
 				}
 			}
+			feed := 0
+			if shown != nil {
+				feed = int(shown[i])
+			}
+			exposed := peer + feed
 			if exposed == 0 {
+				continue
+			}
+			// A person with no ties at all was previously unreachable by
+			// construction. That is right for a peer channel and wrong for a
+			// broadcast one -- being isolated does not keep a feed off your
+			// phone -- so the degree-0 early return is gone and the threshold
+			// rule below handles it instead.
+			if len(nb) == 0 && feed == 0 {
 				continue
 			}
 
@@ -189,11 +222,17 @@ func (c *Contagion) Advance(g *Graph) int {
 				if r.f64() < 1-math.Pow(1-c.Beta, float64(exposed)) {
 					c.next[i] = Adopted
 					c.AdoptedAt[i] = int32(c.Step + 1)
+					c.FeedDriven[i] = peer == 0
 					n++
 				}
 				continue
 			}
 
+			// The denominator stays the peer degree. A feed does not enlarge
+			// the circle a person measures consensus against -- it changes how
+			// many of that circle appear to have acted. Dividing by degree plus
+			// feed volume would make a heavy feed user *harder* to convince the
+			// more they were shown, which is backwards.
 			need := int(math.Ceil(float64(c.Threshold[i]) * scale * float64(len(nb))))
 			if need < c.MinReinforce {
 				need = c.MinReinforce
@@ -201,6 +240,10 @@ func (c *Contagion) Advance(g *Graph) int {
 			if exposed >= need {
 				c.next[i] = Adopted
 				c.AdoptedAt[i] = int32(c.Step + 1)
+				// Attribution: would this person have adopted on peer ties
+				// alone? If not, the feed is what did it. This is the number
+				// the whole media layer has to justify itself with.
+				c.FeedDriven[i] = peer < need
 				n++
 			}
 		}
@@ -252,6 +295,32 @@ func (c *Contagion) Reach(w *world.World) float64 {
 	return num / den
 }
 
+// FeedShare is the weighted share of *adopters* who cleared their threshold
+// only because the feed made up the difference. It is the honest answer to
+// "what did the algorithm actually do here", and it is reported as a share of
+// adopters rather than of the population because that is the question being
+// asked: of the people who acted, how many needed the amplification.
+func (c *Contagion) FeedShare(w *world.World) float64 {
+	if c.FeedDriven == nil {
+		return 0
+	}
+	var num, den float64
+	for i := 0; i < w.N; i++ {
+		if c.State[i] == Unaware {
+			continue
+		}
+		wt := float64(w.Weight[i])
+		den += wt
+		if c.FeedDriven[i] {
+			num += wt
+		}
+	}
+	if den == 0 {
+		return 0
+	}
+	return num / den
+}
+
 // Count is the raw number of adopters, for tests and for the renderer.
 func (c *Contagion) Count() int {
 	n := 0
@@ -267,6 +336,9 @@ func (c *Contagion) Reset() {
 	for i := range c.State {
 		c.State[i] = Unaware
 		c.AdoptedAt[i] = -1
+	}
+	for i := range c.FeedDriven {
+		c.FeedDriven[i] = false
 	}
 	// Thresholds too: they are population state, not story state, and
 	// ApplyReactions has almost certainly moved them.
