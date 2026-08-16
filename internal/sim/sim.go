@@ -217,6 +217,16 @@ func (s *Sim) Inject(ev Event) []int32 {
 		s.M.Ignite(ev.Salience)
 	}
 
+	// A fresh script for the chat: the previous one, canned or model-authored,
+	// is about whatever story broke last and has nothing to do with this one.
+	if s.Chat != nil {
+		lean := make([]float64, len(s.Chat.Friends))
+		for i, f := range s.Chat.Friends {
+			lean[i] = float64(s.O.Prior[f.ID]) * float64(ev.Stance)
+		}
+		s.Chat.NewScript(ev.Seed, lean)
+	}
+
 	s.baseOpinion = s.O.Mean(s.W)
 	s.baseNeg, s.basePos = s.O.Polarisation(s.W, 0.35)
 	s.captureBaseline()
@@ -527,4 +537,15 @@ func (s *Sim) RerollChat(kind CohortKind, seed uint64) bool {
 	}
 	s.Chat = c
 	return true
+}
+
+// InstallChatScript hands the chat a model-authored exchange, reported back to
+// the caller so it can log or discard a stale result instead of assuming it
+// landed. See Cohort.InstallModelScript for why it can refuse: the
+// conversation has to already be un-started for this to apply.
+func (s *Sim) InstallChatScript(turns []ScriptedTurn) bool {
+	if s.Chat == nil {
+		return false
+	}
+	return s.Chat.InstallModelScript(turns)
 }

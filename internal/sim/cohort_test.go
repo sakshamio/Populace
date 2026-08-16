@@ -312,6 +312,188 @@ func (s stubReactionSource) Reaction(archetype int) (string, bool) {
 	return "", false
 }
 
+// buildCannedScript is what makes the chat an actual exchange rather than six
+// independent reactions to the news -- so the property worth checking is the
+// reply structure, not just "6 turns exist".
+func TestBuildCannedScriptIsAConnectedThread(t *testing.T) {
+	w := testWorld(t, testN)
+	s := New(w, DefaultConfig())
+	c := s.Chat
+	lean := make([]float64, len(c.Friends))
+	for i, f := range c.Friends {
+		lean[i] = float64(s.O.Prior[f.ID])
+	}
+
+	script := buildCannedScript(c, 4242, lean)
+	if len(script) < len(c.Friends) {
+		t.Fatalf("script has %d turns for %d friends -- everyone should get at least one",
+			len(script), len(c.Friends))
+	}
+
+	opened := false
+	for i, turn := range script {
+		if turn.Speaker < 0 || turn.Speaker >= len(c.Friends) {
+			t.Errorf("turn %d has speaker index %d, out of range for %d friends",
+				i, turn.Speaker, len(c.Friends))
+		}
+		if turn.ReplyTo == -1 {
+			if opened {
+				t.Errorf("turn %d opens a new thread, but the first turn already did -- "+
+					"every later turn should reply to something", i)
+			}
+			opened = true
+			continue
+		}
+		if turn.ReplyTo < 0 || turn.ReplyTo >= i {
+			t.Errorf("turn %d replies to %d, which is not an earlier turn -- "+
+				"a reply must point backward, or it cannot have landed yet when this fires", i, turn.ReplyTo)
+		}
+	}
+	if !opened {
+		t.Error("no turn opened the thread (reply_to == -1)")
+	}
+	t.Logf("script (%d turns):", len(script))
+	for i, turn := range script {
+		t.Logf("  [%d] %-8s reply_to=%-3d %s", i, c.Friends[turn.Speaker].Name, turn.ReplyTo, turn.Text)
+	}
+}
+
+// Same seed, same script -- determinism holds here for the same reason it
+// holds everywhere else in this codebase: a run has to replay identically.
+func TestBuildCannedScriptIsDeterministic(t *testing.T) {
+	w := testWorld(t, testN)
+	s := New(w, DefaultConfig())
+	lean := make([]float64, len(s.Chat.Friends))
+	a := buildCannedScript(s.Chat, 777, lean)
+	b := buildCannedScript(s.Chat, 777, lean)
+	if len(a) != len(b) {
+		t.Fatalf("different lengths: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("turn %d differs: %+v vs %+v", i, a[i], b[i])
+		}
+	}
+}
+
+// The heart of the release mechanism: a turn must not appear before its
+// speaker has actually heard the story, and a reply must not appear before the
+// message it replies to has landed. Both are checked against the live
+// message stream, not against the script in isolation.
+func TestReleaseScriptRespectsAdoptionAndReplyOrder(t *testing.T) {
+	w := testWorld(t, testN)
+	s := New(w, DefaultConfig())
+	s.Inject(Event{Headline: "script order test", Stance: 0.4, Salience: 0.9,
+		Seeding: SeedInRegion, SeedSize: 900, Seed: 21, Difficulty: 0.8})
+
+	landedAt := map[int]int{} // message ID -> tick
+	for i := 0; i < 80; i++ {
+		s.Advance()
+	}
+	for _, m := range s.Chat.Messages {
+		if m.Kind != "script" && m.Kind != "script-model" {
+			continue
+		}
+		landedAt[m.ID] = m.Tick
+		if m.ReplyTo < 0 {
+			continue
+		}
+		replyTick, ok := landedAt[m.ReplyTo]
+		if !ok {
+			t.Errorf("message %d (t%d) replies to message %d, which is not in the "+
+				"released set at all -- a reply appeared before what it replies to",
+				m.ID, m.Tick, m.ReplyTo)
+			continue
+		}
+		if replyTick > m.Tick {
+			t.Errorf("message %d (t%d) replies to message %d which landed later, at t%d",
+				m.ID, m.Tick, m.ReplyTo, replyTick)
+		}
+	}
+	if len(landedAt) == 0 {
+		t.Error("no script turns released in 80 ticks of a story that should have reached this cohort")
+	}
+	t.Logf("%d script turns released", len(landedAt))
+	for _, m := range s.Chat.Messages {
+		if m.Kind == "script" || m.Kind == "script-model" {
+			t.Logf("  t%-3d [id %d, reply_to %d] %s: %s", m.Tick, m.ID, m.ReplyTo, m.From, m.Text)
+		}
+	}
+}
+
+// A friend who never hears the story must not silently take the rest of the
+// script down with them -- this is what scriptStallLimit exists for.
+func TestReleaseScriptSkipsAStalledSpeakerEventually(t *testing.T) {
+	w := testWorld(t, 20_000)
+	s := New(w, DefaultConfig())
+	// A script where the second turn's speaker will never adopt: seed nothing
+	// near them and just fast-forward the stall clock directly rather than
+	// waiting out scriptStallLimit ticks for real.
+	s.Chat.script = []ScriptedTurn{
+		{Speaker: 0, Text: "opens", ReplyTo: -1},
+		{Speaker: 1, Text: "never arrives", ReplyTo: -1},
+		{Speaker: 2, Text: "closes", ReplyTo: -1},
+	}
+	s.Chat.scriptMsgID = []int{-1, -1, -1}
+	s.Chat.scriptCursor = 0
+	s.Chat.scriptStallSince = -1
+
+	// A real, non-zero tick, or the stall value injected below computes
+	// negative and collides with the "-1 means not yet stalled" sentinel.
+	s.Tick = 500
+
+	// Advance friend 0's state directly so turn 0 releases and the cursor
+	// reaches the stuck turn, without needing a real cascade to do it.
+	s.C.State[s.Chat.Friends[0].ID] = Adopted
+	s.Chat.releaseScript(s)
+	if s.Chat.scriptCursor != 1 {
+		t.Fatalf("expected cursor at 1 after releasing turn 0, got %d", s.Chat.scriptCursor)
+	}
+
+	// Friend 1 never adopts. Simulate the stall clock running out.
+	s.Chat.scriptStallSince = s.Tick - scriptStallLimit - 1
+	s.C.State[s.Chat.Friends[2].ID] = Adopted
+	s.Chat.releaseScript(s)
+	if s.Chat.scriptCursor != 3 {
+		t.Fatalf("expected the stalled turn skipped and turn 2 released, cursor at 3, got %d",
+			s.Chat.scriptCursor)
+	}
+	if len(s.Chat.Messages) != 2 {
+		t.Fatalf("expected 2 messages (turn 1 skipped, never said), got %d", len(s.Chat.Messages))
+	}
+	if s.Chat.Messages[1].From != s.Chat.Friends[2].Name {
+		t.Errorf("second message should be from the third friend (turn 1 skipped), got %q",
+			s.Chat.Messages[1].From)
+	}
+}
+
+// InstallModelScript must refuse once the conversation has actually started --
+// swapping in different, unrelated text after some of it has already been
+// said would read as rewriting history rather than as the chat getting richer.
+func TestInstallModelScriptRefusesAfterTheThreadHasStarted(t *testing.T) {
+	w := testWorld(t, 20_000)
+	s := New(w, DefaultConfig())
+
+	fresh := []ScriptedTurn{{Speaker: 0, Text: "model line", ReplyTo: -1}}
+	if !s.Chat.InstallModelScript(fresh) {
+		t.Fatal("should apply cleanly before anything has been released")
+	}
+
+	// Release one turn, then try to swap again.
+	s.C.State[s.Chat.Friends[0].ID] = Adopted
+	s.Chat.releaseScript(s)
+	if len(s.Chat.Messages) != 1 {
+		t.Fatalf("expected the model turn to have released, got %d messages", len(s.Chat.Messages))
+	}
+
+	if s.Chat.InstallModelScript([]ScriptedTurn{{Speaker: 1, Text: "too late", ReplyTo: -1}}) {
+		t.Error("InstallModelScript applied after the thread had already started releasing turns")
+	}
+	if len(s.Chat.script) != 1 || s.Chat.script[0].Text != "model line" {
+		t.Error("the original script should be unchanged after a refused swap")
+	}
+}
+
 // Reset must not leave the chat reacting to a story that no longer exists.
 func TestChatResetDropsTheDiffBaseline(t *testing.T) {
 	w := testWorld(t, 20_000)

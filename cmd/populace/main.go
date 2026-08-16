@@ -326,6 +326,55 @@ func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
 			p := srv.relay.Progress()
 			log.Printf("chat reactions warmed: %d archetypes, %d from cache, %.1fs, err=%v",
 				len(warmArchetypes), p.FromCache, p.ElapsedS, err)
+
+			// The actual conversation, not six independent opinions -- see
+			// reaction.Dialogue. Grounded in whatever just landed above: each
+			// member carries their own archetype's stance if the warm-up found
+			// one, so the exchange is consistent with what the model already
+			// said this kind of person thinks rather than a second,
+			// disconnected read of them.
+			//
+			// story is a snapshot from before this goroutine started; srv.story
+			// may have moved on to a newer headline by the time we get here, in
+			// which case none of this should be applied. Checked twice -- once
+			// before spending the tokens, once before installing the result --
+			// because a second story can break in the gap either way.
+			srv.mu.Lock()
+			current := srv.story.Fingerprint() == story.Fingerprint()
+			var members []reaction.DialogueMember
+			var relationship string
+			if current && srv.s.Chat != nil {
+				relationship = srv.s.Chat.Sketch()
+				for _, f := range srv.s.Chat.Friends {
+					arch := int(world.Archetype(srv.w.Arch[f.ID]))
+					m := reaction.DialogueMember{Name: f.Name, Role: f.Role, Place: f.Place, Region: f.Region}
+					if rx, ok := srv.relay.Get(reaction.Key{Archetype: arch, Story: story.Fingerprint()}); ok {
+						m.Stance, m.Salience, m.HaveReaction = rx.Stance, rx.Salience, true
+					}
+					members = append(members, m)
+				}
+			}
+			srv.mu.Unlock()
+			if !current || len(members) == 0 {
+				return
+			}
+
+			dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer dcancel()
+			turns, tokens, err := srv.relay.Dialogue(dctx, members, relationship, story)
+			if err != nil {
+				log.Printf("chat dialogue failed: %v", err)
+				return
+			}
+			scripted := make([]sim.ScriptedTurn, len(turns))
+			for i, t := range turns {
+				scripted[i] = sim.ScriptedTurn{Speaker: t.Speaker, Text: t.Text, ReplyTo: t.ReplyTo}
+			}
+
+			srv.mu.Lock()
+			applied := srv.story.Fingerprint() == story.Fingerprint() && srv.s.InstallChatScript(scripted)
+			srv.mu.Unlock()
+			log.Printf("chat dialogue: %d turns, %d tokens, applied=%v", len(turns), tokens, applied)
 		}()
 	}
 

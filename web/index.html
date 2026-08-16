@@ -310,6 +310,11 @@
   .msg .b i{font-style:normal;display:block;font-family:var(--font-body);font-weight:700;
     font-size:9.5px;color:var(--feed);margin-top:6px}
   .msg.feed .b{border-color:var(--feed)}
+  /* The reply hint: what makes this read as a thread rather than a list of
+     unconnected lines. Quiet on purpose -- it is a wayfinding aid, not the
+     point of the message. */
+  .msg .b .rt{display:block;font-family:var(--font-body);font-weight:700;
+    font-size:9.5px;color:#7488AD;margin-bottom:5px;letter-spacing:.01em}
 
   /* A live-model message is a genuinely different fact from a feed-delivered
      one -- feed vs peer is *how* the story arrived, live vs canned is *who
@@ -1255,15 +1260,28 @@ async function pollChat() {
   // impossible to actually read.
   if (chatPainted === msgs.length) return;
   chatPainted = msgs.length;
+
+  // reply_to is a stable message ID, not a position in this array -- it has
+  // to be, since only the most recent maxHistory messages are ever sent and a
+  // position-based reference would silently repoint itself once older
+  // messages fall off the front. A reply_to this batch does not contain (its
+  // target aged out) just renders with no hint rather than a broken one.
+  const byId = {};
+  msgs.forEach(m => { byId[m.id] = m; });
+
   $('ch-log').innerHTML = msgs.map(m => {
-    // live: the model actually answered for this archetype about this story,
-    // and this is that answer -- not a fact about how the story arrived
-    // (that's .feed, from m.via), which is a separate, independent thing.
-    const live = m.kind === 'heard-live';
+    // live: the model actually wrote these words for this specific person --
+    // either their own single-line take (heard-live) or their line in the
+    // authored exchange (script-model). Not a fact about how the story
+    // arrived (that's .feed, from m.via), which is independent of who wrote
+    // the text.
+    const live = m.kind === 'heard-live' || m.kind === 'script-model';
+    const target = m.reply_to >= 0 ? byId[m.reply_to] : null;
     return `
     <div class="msg ${m.via ? 'feed' : ''} ${live ? 'live' : ''}">
       <div class="t">t${m.tick}</div>
-      <div class="b"><b style="color:${m.via ? 'var(--feed)' : (nameColor[m.from] || 'var(--gold)')}">${esc(m.from)}${live ? '<em>model</em>' : ''}</b>${esc(m.text)}
+      <div class="b"><b style="color:${m.via ? 'var(--feed)' : (nameColor[m.from] || 'var(--gold)')}">${esc(m.from)}${live ? '<em>model</em>' : ''}</b>
+        ${target ? `<small class="rt">&#8618; replying to ${esc(target.from)}</small>` : ''}${esc(m.text)}
         ${m.via ? `<i>arrived via ${esc(m.via)} &mdash; the algorithm got there before their friends did</i>` : ''}</div>
     </div>`;
   }).join('');

@@ -36,10 +36,22 @@ type Cohort struct {
 	Friends    []Friend `json:"friends"`
 	Messages   []Message
 	maxHistory int
+	nextMsgID  int
 
 	// Last tick's values for these six only; see Observe.
 	prevState []uint8
 	prevY     []float32
+
+	// script is a pre-written exchange -- a real back-and-forth rather than six
+	// independent reactions to the news -- released one turn at a time as its
+	// speaker's own contagion state says they have actually heard the story.
+	// See buildCannedScript and releaseScript for the mechanism; ScriptedTurn
+	// for the shape.
+	script           []ScriptedTurn
+	scriptCursor     int   // index of the next turn waiting to be released
+	scriptStallSince int   // tick the cursor got stuck on an unheard speaker, -1 if not stuck
+	scriptMsgID      []int // Message.ID each released turn landed at, -1 if not yet released
+	scriptIsModel    bool  // for the UI tag: canned wit vs the model's actual words
 }
 
 // CohortKind is which rule picked these six people. The rule is the
@@ -182,6 +194,11 @@ type Friend struct {
 // Message is one line in the chat, caused by something that happened in the
 // simulation on that tick.
 type Message struct {
+	// ID is stable across the trim in say(), unlike a slice index. ReplyTo
+	// below has to survive that trim to keep pointing at the right message, or
+	// old history sliding out of maxHistory would silently reattach replies to
+	// whatever happens to be sitting at the same offset afterward.
+	ID   int    `json:"id"`
 	Tick int    `json:"tick"`
 	From string `json:"from"`
 	Text string `json:"text"`
@@ -191,8 +208,24 @@ type Message struct {
 	// transition, and the kind names the transition.
 	Kind string `json:"kind"`
 
+	// ReplyTo is another message's ID, or -1. Set only on script turns -- see
+	// ScriptedTurn -- because only a script has the reply structure to know
+	// this; an independent reaction has nothing to reply to by construction.
+	ReplyTo int `json:"reply_to"`
+
 	Opinion float64 `json:"opinion"`
 	Via     string  `json:"via,omitempty"` // platform, when the feed delivered it
+}
+
+// ScriptedTurn is one line of a pre-written exchange among this cohort's six
+// people about the current story -- a real conversation, not six independent
+// reactions to the news. Speaker indexes into Cohort.Friends; ReplyTo indexes
+// into the script slice itself (not into Messages, and not -- yet -- a stable
+// ID: that translation happens in releaseScript, once a turn actually fires).
+type ScriptedTurn struct {
+	Speaker int
+	Text    string
+	ReplyTo int // -1 for a turn that opens a new thread rather than answering one
 }
 
 // NewCohort picks six people according to kind. See CohortKind for what each
@@ -578,6 +611,14 @@ func (c *Cohort) Observe(s *Sim, rs ReactionSource) {
 			c.say(s.Tick, f, strengthenLine(f, y, y > py), "dug-in", y, "")
 		}
 	}
+
+	// The script is a separate, additive channel: a friend's own reaction to
+	// the news above is independent of whatever the pre-written exchange has
+	// them saying later. The two occasionally sit close together in the
+	// transcript -- someone's quick reflexive line, then a moment later a
+	// fuller remark once the group has actually started talking -- which is
+	// not a bug, it is what texting a group chat is actually like.
+	c.releaseScript(s)
 }
 
 // loudestPlatform names the platform most likely to have delivered the story to
@@ -595,13 +636,26 @@ func (c *Cohort) loudestPlatform(m *Media, id int32) string {
 	return best
 }
 
-func (c *Cohort) say(tick int, f *Friend, text, kind string, y float64, via string) {
-	c.Messages = append(c.Messages, Message{
-		Tick: tick, From: f.Name, Text: text, Kind: kind, Opinion: y, Via: via,
+// say appends an independent reaction -- one with no reply structure, because
+// nothing produced one. Scripted turns go through sayScript instead.
+func (c *Cohort) say(tick int, f *Friend, text, kind string, y float64, via string) int {
+	return c.append(Message{
+		Tick: tick, From: f.Name, Text: text, Kind: kind,
+		ReplyTo: -1, Opinion: y, Via: via,
 	})
+}
+
+// append assigns a stable ID, stores the message, trims history, and returns
+// the ID -- needed by releaseScript to record where a turn landed, so a later
+// turn replying to it can resolve the reply after any amount of trimming.
+func (c *Cohort) append(m Message) int {
+	m.ID = c.nextMsgID
+	c.nextMsgID++
+	c.Messages = append(c.Messages, m)
 	if len(c.Messages) > c.maxHistory {
 		c.Messages = c.Messages[len(c.Messages)-c.maxHistory:]
 	}
+	return m.ID
 }
 
 // Reset clears the conversation but keeps the people. They do not stop being
@@ -613,7 +667,201 @@ func (c *Cohort) Reset() {
 		// after a reset compare against the old story's state and open the new
 		// conversation with six people reacting to news that no longer exists.
 		c.prevState, c.prevY = nil, nil
+		c.script, c.scriptCursor, c.scriptStallSince, c.scriptMsgID = nil, 0, -1, nil
+		c.scriptIsModel = false
+		// nextMsgID is NOT reset: IDs only need to stay unique for this
+		// Cohort's lifetime, and a reply_to surviving a reset by landing on
+		// whatever new message happens to reuse ID 0 is a far worse bug than
+		// an ID sequence that does not restart at zero.
 	}
+}
+
+// NewScript replaces the current script with a freshly written one for the
+// story that just broke -- the previous script's text, canned or model-
+// authored, is about the old headline and has nothing to do with this one.
+// lean[i] is a rough read on whether friend i is inclined to agree with the
+// story's own stance (their prior times the stance; same sign means yes),
+// used only to flavour reply templates, never the substantive opinion the
+// simulation tracks.
+func (c *Cohort) NewScript(seed uint64, lean []float64) {
+	if c == nil {
+		return
+	}
+	c.script = buildCannedScript(c, seed, lean)
+	c.scriptMsgID = make([]int, len(c.script))
+	for i := range c.scriptMsgID {
+		c.scriptMsgID[i] = -1
+	}
+	c.scriptCursor = 0
+	c.scriptStallSince = -1
+	c.scriptIsModel = false
+}
+
+// InstallModelScript replaces the canned script with the model's authored
+// dialogue, but only if nothing has been released from the current script
+// yet. Once the conversation has actually started, swapping its remaining
+// turns for a different set written without knowledge of what was already
+// said would read as someone rewriting history rather than as the
+// conversation getting richer. If the model answers before anyone in the
+// cohort has adopted -- which the eager warm-up in cmd/populace is
+// specifically timed to make the common case -- this always applies cleanly.
+func (c *Cohort) InstallModelScript(turns []ScriptedTurn) bool {
+	if c == nil || c.scriptCursor != 0 {
+		return false
+	}
+	c.script = turns
+	c.scriptMsgID = make([]int, len(turns))
+	for i := range c.scriptMsgID {
+		c.scriptMsgID[i] = -1
+	}
+	c.scriptIsModel = true
+	c.scriptStallSince = -1
+	return true
+}
+
+// scriptStallLimit bounds how long releaseScript waits on one turn before
+// giving up on it. Generous relative to how fast a cohort of six usually all
+// adopt once the first of them does, so it only ever fires on the genuine
+// edge case -- a speaker the cascade never reaches -- rather than on ordinary
+// variance in arrival time.
+const scriptStallLimit = 120
+
+// releaseScript advances the script by at most one turn per tick, gated on
+// the turn's speaker having actually heard the story (their contagion state
+// is not Unaware) and, if the turn replies to another, on that earlier turn
+// having already landed. Strictly in script order, never by scanning ahead for
+// whichever turn happens to be ready first -- a conversation that jumped
+// around to whoever adopted soonest would not read as one conversation.
+//
+// A cursor stuck because its speaker never adopts would otherwise silence
+// everything behind it forever; after scriptStallLimit it gives up on that one
+// turn and moves to the next, so one unlucky adoption timing does not take the
+// whole exchange down with it.
+func (c *Cohort) releaseScript(s *Sim) {
+	if c == nil {
+		return
+	}
+	for c.scriptCursor < len(c.script) {
+		t := c.script[c.scriptCursor]
+		if t.Speaker < 0 || t.Speaker >= len(c.Friends) {
+			// Cannot happen from buildCannedScript; can happen from a model
+			// response with a bad index. Skip rather than crash the thread.
+			c.scriptCursor++
+			c.scriptStallSince = -1
+			continue
+		}
+		speakerID := c.Friends[t.Speaker].ID
+		heard := s.C.State[speakerID] != Unaware
+		depReady := t.ReplyTo < 0 ||
+			(t.ReplyTo < len(c.scriptMsgID) && c.scriptMsgID[t.ReplyTo] >= 0)
+
+		if heard && depReady {
+			replyID := -1
+			if t.ReplyTo >= 0 && t.ReplyTo < len(c.scriptMsgID) {
+				replyID = c.scriptMsgID[t.ReplyTo]
+			}
+			kind := "script"
+			if c.scriptIsModel {
+				kind = "script-model"
+			}
+			id := c.append(Message{
+				Tick: s.Tick, From: c.Friends[t.Speaker].Name, Text: t.Text,
+				Kind: kind, ReplyTo: replyID, Opinion: float64(s.O.Y[speakerID]),
+			})
+			c.scriptMsgID[c.scriptCursor] = id
+			c.scriptCursor++
+			c.scriptStallSince = -1
+			// One release per tick: a chat that unloads eight lines the
+			// instant everyone happens to adopt together reads as a dump of
+			// text, not as people actually typing.
+			return
+		}
+
+		if c.scriptStallSince < 0 {
+			c.scriptStallSince = s.Tick
+		}
+		if s.Tick-c.scriptStallSince < scriptStallLimit {
+			return
+		}
+		c.scriptCursor++
+		c.scriptStallSince = -1
+	}
+}
+
+// buildCannedScript writes a deterministic, story-specific exchange: someone
+// breaks the news outright, the others reply agreeing or pushing back rather
+// than each stating an independent opinion, and it tails off into a tangent --
+// the shape of an actual thread rather than six unconnected reactions. This is
+// what a cohort with no model configured runs on forever, and what every
+// cohort runs on until a model, if configured, answers.
+func buildCannedScript(c *Cohort, seed uint64, lean []float64) []ScriptedTurn {
+	n := len(c.Friends)
+	if n == 0 {
+		return nil
+	}
+	r := newRNG(seed, 0xC5A7)
+
+	// A random speaking order rather than Friends order, which is sorted by
+	// persona ID for a stable roster -- a thread that always opened with the
+	// same person would read as scripted in the bad sense.
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	for i := n - 1; i > 0; i-- {
+		j := int(r.u32()) % (i + 1)
+		order[i], order[j] = order[j], order[i]
+	}
+
+	script := make([]ScriptedTurn, 0, n+2)
+	var openedAt []int // script indices that opened a thread, in the order they did
+
+	first := order[0]
+	script = append(script, ScriptedTurn{
+		Speaker: first, ReplyTo: -1,
+		Text: pick(&c.Friends[first], 14, []string{
+			"ok have you all seen this",
+			"did anyone catch this",
+			"wait, has everyone seen this yet",
+		}),
+	})
+	openedAt = append(openedAt, 0)
+
+	for _, idx := range order[1:] {
+		replyTo := openedAt[int(r.u32())%len(openedAt)]
+		target := script[replyTo].Speaker
+		agree := lean[idx]*lean[target] >= 0
+		text := replyLine(&c.Friends[idx], c.Friends[target].Name, agree)
+		script = append(script, ScriptedTurn{Speaker: idx, Text: text, ReplyTo: replyTo})
+		openedAt = append(openedAt, len(script)-1)
+	}
+
+	// One or two people wander off topic, replying to whoever spoke last --
+	// this is what closes the thread rather than leaving it hanging.
+	for k, tangents := 0, 1+int(r.u32()%2); k < tangents; k++ {
+		idx := order[int(r.u32())%n]
+		script = append(script, ScriptedTurn{
+			Speaker: idx, ReplyTo: len(script) - 1, Text: tiredLine(&c.Friends[idx]),
+		})
+	}
+	return script
+}
+
+func replyLine(f *Friend, targetName string, agree bool) string {
+	if agree {
+		return fmt.Sprintf(pick(f, 12, []string{
+			"yeah %s, that's exactly it",
+			"%s's right about this one",
+			"honestly agree with %s here",
+			"same, %s. no notes",
+		}), targetName)
+	}
+	return fmt.Sprintf(pick(f, 13, []string{
+		"eh, not sure I'm with you on this one %s",
+		"disagree %s, I think it's more complicated",
+		"%s I really don't see it that way",
+		"hard no from me on this %s",
+	}), targetName)
 }
 
 // The lines below are deterministic and state-driven. They are intentionally

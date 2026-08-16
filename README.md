@@ -127,6 +127,62 @@ never blocks the tick loop: the warm-up runs in the background and a friend who
 hears before it lands simply gets the canned line, same as with no model
 configured at all. No model configured is exactly that fallback, forever.
 
+## The chat is an actual conversation, not six opinions
+
+A Reaction is one sentence: what a kind of person thinks. That is the right
+question for the population -- 450 archetypes cannot hold a conversation, only
+opinions. Six *named* people who know each other do not each independently
+announce a stance at the group; they talk. Early versions of this chat had them
+do the former anyway: six unconnected reactions to the news, ordered by
+whoever's contagion state changed first. It read like six monologues that
+happened to share a feed.
+
+Every cohort now runs on a `ScriptedTurn` script -- a real exchange, not a
+list. Someone breaks the news, someone else agrees or pushes back by name,
+someone asks a question, it tails off into a tangent. It is written once, in
+full, before anyone has said a word, and then played out one turn at a time as
+its own mechanism allows:
+
+- **A turn only fires once its speaker has actually heard the story** (their
+  own contagion state says `Adopted`), never before. This is the same audit
+  property the rest of the chat has always had: what appears on screen still
+  has to agree with what the cascade is doing underneath it.
+- **A reply only fires after what it replies to has already landed**, so the
+  transcript reads in a coherent order no matter how contagion happens to
+  reach these six people. A turn stuck behind a speaker who takes unusually
+  long to adopt waits; if they never do, it gives up after a generous timeout
+  and moves on, rather than silencing everyone behind them forever.
+- One release per tick, so a conversation does not dump itself onto the screen
+  the instant several people happen to adopt together.
+
+**Without a model, the script is written locally and deterministically** --
+who opens, who replies to whom, agreeing or pushing back based on each
+person's own prior leaning against the story's stance -- and that is what
+every cohort runs on forever if no gateway is configured. **With a model, the
+same eager warm-up that answers the six archetypes also authors a real
+exchange in one call**, grounded in whatever those archetypes' reactions
+already say, and swaps in for the local script -- cleanly, because the swap
+only applies before anything has been said yet, so it never contradicts a line
+already on screen. A real one, temperature 0.9, unedited:
+
+```
+Takeshi  did anyone catch this
+Ji-woo   ↳ replying to Takeshi
+         Huh? I barely even check those notices anymore.
+Sora     ↳ replying to Ji-woo
+         Ugh, not again. I was just barely making rent this month.
+Tane     Haha, I can't believe I'm in a group chat discussing
+         Chinese tax policy from Sydney. Just make sure you guys
+         eat properly, don't let the stress ruin your appetite.
+Takeshi  ↳ replying to Takeshi
+         It's not just about the costs, it's about the uncertainty.
+         I'm thinking of shifting some of my portfolio to the
+         industrial sector where the regulations are more stable.
+```
+
+See `internal/reaction/dialogue.go` for the prompt and
+`Cohort.releaseScript` in `internal/sim/cohort.go` for the release mechanism.
+
 ## What is not here, and why
 
 **Step back.** Rewinding needs a stored copy of every persona per tick: 20 MB a
