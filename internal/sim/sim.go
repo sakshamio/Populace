@@ -3,6 +3,7 @@ package sim
 import (
 	"encoding/binary"
 	"io"
+	"time"
 
 	"github.com/sakshamio/Populace/internal/world"
 )
@@ -40,6 +41,15 @@ type Sim struct {
 	baseOpinion float64
 	baseNeg     float64
 	basePos     float64
+	base        baseline
+
+	history  []Sample
+	histHead int
+
+	// TickMS is an exponentially weighted mean of tick cost. Shown in the UI
+	// because a tick budget quietly overrunning the tick interval is the first
+	// symptom of a world too big for the box, and it is invisible otherwise.
+	TickMS float64
 }
 
 type Config struct {
@@ -91,7 +101,15 @@ func (s *Sim) settle() {
 // derived tells you only what you already assumed.
 type Event struct {
 	Headline string
-	Stance   float32 // where the coverage sits, in [-1, 1]
+
+	// Stance is where the *coverage* sits, not whether the news is good for
+	// anyone. Those come apart more often than they look like they would:
+	// coverage hostile to a company reads as good news to its customers, and a
+	// run of this exact case moved the population +6pp *in favour* off a
+	// stance of -0.8. Once model reactions are applied they override this per
+	// archetype, which is the right resolution -- the model knows who benefits
+	// and a single scalar cannot.
+	Stance   float32 // in [-1, 1]
 	Salience float64 // share of media personas that cover it, in [0, 1]
 
 	// Seeding decides where the story first takes hold, and it changes the
@@ -169,6 +187,8 @@ func (s *Sim) Inject(ev Event) []int32 {
 	}
 	s.baseOpinion = s.O.Mean(s.W)
 	s.baseNeg, s.basePos = s.O.Polarisation(s.W, 0.35)
+	s.captureBaseline()
+	s.ResetHistory()
 	s.resync()
 	return seeded
 }
@@ -200,10 +220,19 @@ func (s *Sim) denseStart(seed uint64) int32 {
 // news, which is backwards: the interesting regime is the one where a story
 // spreads faster than people finish arguing about it.
 func (s *Sim) Advance() (newAdopters int, opinionDelta float64) {
+	t0 := time.Now()
 	newAdopters = s.C.Advance(s.G)
 	opinionDelta = s.O.Step(s.G)
 	s.Tick++
 	s.repack()
+
+	ms := float64(time.Since(t0).Microseconds()) / 1000
+	if s.TickMS == 0 {
+		s.TickMS = ms
+	} else {
+		s.TickMS = s.TickMS*0.9 + ms*0.1
+	}
+	s.record(newAdopters, ms)
 	return newAdopters, opinionDelta
 }
 
@@ -400,5 +429,7 @@ func (s *Sim) Reset(cfg Config) {
 	s.settle()
 	s.Tick = 0
 	s.baseOpinion, s.baseNeg, s.basePos = 0, 0, 0
+	s.base = baseline{}
+	s.ResetHistory()
 	s.resync()
 }

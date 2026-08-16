@@ -6,10 +6,11 @@ content and a Go engine doing the per-capita work.
 
 **Plan:** https://claude.ai/code/artifact/cb3b3c4a-f91b-4a80-b24c-f2afbf6f5a7c
 
-## Status — phase 4
+## Status — phase 5
 
 Grounded personas, a social network over them, opinion dynamics and contagion,
-ticking live behind an HTTP API and a WebGL2 globe.
+a language model writing what each kind of person makes of the news, and an
+instrument panel that shows all of it while it runs.
 
 ```
 go run ./cmd/populace -n 1000000
@@ -18,6 +19,12 @@ open http://localhost:8080
 
 Flags: `-n` personas, `-seed` world seed, `-tick` ms between ticks, `-run`
 start ticking immediately, `-addr`, `-web`.
+
+With a model gateway (see phase 2), add:
+
+```
+go run ./cmd/populace -gateway http://127.0.0.1:8091 -token "$LLM_TOKEN"
+```
 
 `go run ./cmd/simbench` reproduces every performance number quoted below.
 
@@ -73,9 +80,8 @@ web/                WebGL2 renderer, one draw call
 
 - Phase 2: Go gateway on the Spark (auth, admission control at 8 in flight,
   priority lanes) and Tailscale from Railway.
-- The language model in the loop: `/api/archetypes` is already the generation
-  manifest. Walk it once through the phase-2 gateway, cache forever.
 - LOD ladder down to palette-indexed pixel sprites.
+- Calibration. The mechanisms are tested; the magnitudes are not.
 - Stratum share should vary by region. It currently does not: high-net-worth is
   3% of Lagos and 3% of Zurich, which understates real inequality. The mix
   *within* a stratum does shift correctly; the marginal does not.
@@ -340,3 +346,120 @@ bucket) turned that into one lookup:
 | heap | 0.15 GB | 1.47 GB |
 
 21 tests across `internal/world` and `internal/sim`, clean under `-race`.
+
+## Phase 5 — the model in the loop, and instruments to watch it
+
+### The division of labour is the architecture
+
+The model decides **what a kind of person thinks**; the simulation decides
+**how that spreads**. Neither does the other's job. A model asked to predict
+aggregate public opinion would be guessing; a simulation asked to invent what a
+Chennai market trader makes of a regulatory inquiry would be asserting.
+
+`internal/reaction` walks the 450-archetype manifest through the phase-2
+gateway and returns four fields per archetype — stance, salience, share, and
+one sentence. Three of them feed the engine and are the *only* things the model
+is allowed to set:
+
+- **stance** moves the Friedkin–Johnsen prior, scaled by salience
+- **share** lowers the adoption threshold, never below the reinforcement floor
+- **line** is for the reader
+
+It writes to *priors*, not opinions. The network still decides what people end
+up thinking; writing straight to `Y` would overwrite the dynamics with the
+model's guess and make the graph decorative.
+
+### Measured, against a real DGX Spark
+
+| | |
+|---|---|
+| full pass, 450 archetypes | **488 s** |
+| throughput | 60.6 tok/s at concurrency 6 |
+| tokens | 29,601 |
+| failures | 2 of 450, both recovered on the next run |
+| same story again, from cache | **5 s** |
+| cache on disk | 228 kB |
+
+Nothing here scales with population — ten million personas and ten thousand
+cost the same pass.
+
+### What it produces
+
+> **smallholder farmer / South Asia** — stance +0.00, cares 0.10
+> *"I barely care who owns the trucks since I can't even afford to ship my
+> harvest to the distant market; the only inquiry that matters is whether the
+> monsoon rains will hit on schedule."*
+
+> **market trader / South Asia** — stance +0.50, cares 0.80
+> *"If they are squeezing the last drop of profit from the big lines, my
+> transport costs are going to spike by next week, so I need to know if I can
+> pass that on to the buyers before they switch to the cheaper, slower route."*
+
+The system prompt is blunt about the two failure modes that make generated
+persona reactions useless — sounding like a press release, and agreeing with
+everything. "Many people are indifferent to most news. A low salience is a
+valid answer and often the right one."
+
+### The model corrected the framing
+
+The story was injected with `stance: -0.8` — hostile coverage of a carrier —
+and the population moved **+6.27pp in favour**. That is not a bug. Coverage
+hostile to a company reads as *good news* to its customers, and the per-
+archetype reactions said so. `Event.Stance` is where the coverage sits, not
+whether the news is good for anyone; once reactions are applied they override
+it per archetype, which is the right resolution because a single scalar cannot
+know who benefits.
+
+### Observability
+
+The panel beside the globe is the deliverable, not a status line. It shows:
+
+- **this story** — reach, adopters, and *shift* rather than level, because the
+  level is mostly what the population already believed
+- **cascade** — reach, new adopters per tick, and opinion shift as sparklines
+  drawn on a canvas (both the Artifact and Railway CSPs block chart CDNs, and
+  three series of ≤1800 points do not need 200 kB of library)
+- **the model** — generated vs from-cache vs failed, live tok/s, elapsed, ETA,
+  and the last error in full
+- **what people said** — ranked by how much the archetype *cares*, not by how
+  strongly they feel; ranking by stance shows only the loudest, which is the
+  sampling error the strata exist to avoid
+- **by region and by stratum** — reach, opinion shift, and mean ties
+
+That last cut is where the network becomes legible. From one run:
+
+| stratum | pop | reach | moved | mean ties |
+|---|---|---|---|---|
+| general | 95.1% | 98.85% | +7.45pp | 13.4 |
+| nomadic | 0.4% | 98.36% | +3.93pp | 9.8 |
+| immigrant | 3.5% | 99.06% | +8.13pp | 14.6 |
+| high net worth | 1.0% | 99.04% | +5.27pp | 44.5 |
+| media | 0.0% | 100.00% | +60.60pp | 299.9 |
+
+The mean-ties column explains most of the reach column, which is the point of
+putting them side by side.
+
+### Three things measurement caught
+
+**The dashboard lied about a finished run.** Throughput was computed against
+`time.Now()` forever, so a completed run decayed on screen: 39 tok/s, then 26,
+then 13. That is a number about how long you have been looking at the screen.
+The clock now stops when the run does.
+
+**Two archetypes came back with over-escaped JSON** — the model escaped the
+quotes delimiting its own string value. Repairing only the *delimiters* (a
+quote right after a colon, or right before a comma or brace) recovers them
+without touching escapes inside the sentence, which a blanket unescape would
+eat. A single retry backs it up, because at temperature 0.8 a malformed sample
+is a sample, not a property of the archetype.
+
+**The ETA was computed from completions**, which made it lie whenever the cache
+was warm — cache hits finish instantly and are not the part that takes time.
+It now divides by generations only.
+
+### Operationally
+
+The box rebooted during this phase. Everything came back except the model
+server, which has no unit — and notably `dsv4-api.service`, disabled earlier,
+stayed down and left its 77 GiB free, which is exactly what disabling it was
+for. SGLang takes ~500 s from `docker run` to serving.

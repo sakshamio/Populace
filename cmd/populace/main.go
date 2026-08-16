@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,10 +17,13 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/sakshamio/Populace/internal/llm"
+	"github.com/sakshamio/Populace/internal/reaction"
 	"github.com/sakshamio/Populace/internal/sim"
 	"github.com/sakshamio/Populace/internal/world"
 )
@@ -32,6 +36,15 @@ type server struct {
 	running   bool
 	lastEv    string
 	lastWhere string
+	story     reaction.Story
+
+	relay *reaction.Relay
+	// gateway is recorded so the UI can show whether the model is reachable
+	// at all -- "no reactions yet" and "the Spark is off" look identical
+	// otherwise, and only one of them is worth doing something about.
+	gatewayURL string
+	relayConc  int
+	applyW     float64
 }
 
 func main() {
@@ -43,6 +56,13 @@ func main() {
 		maxSend = flag.Int("max", 10_000_000, "cap on personas served per request")
 		tickMS  = flag.Int("tick", 400, "milliseconds between simulation ticks")
 		run     = flag.Bool("run", true, "start ticking immediately")
+
+		gwURL   = flag.String("gateway", envOr("LLM_GATEWAY_URL", ""), "model gateway base URL; empty disables generation")
+		gwTok   = flag.String("token", os.Getenv("LLM_TOKEN"), "bearer token for the gateway")
+		model   = flag.String("model", envOr("LLM_MODEL", "default"), "model name to request")
+		rxCache = flag.String("reactions", "reactions.json", "path to the reaction cache")
+		rxConc  = flag.Int("relay-conc", 6, "concurrent generations; the gateway reserves 6 of 8 for batch")
+		applyW  = flag.Float64("apply", 1.0, "how far model output moves priors, 0..1")
 	)
 	flag.Parse()
 
@@ -68,7 +88,15 @@ func main() {
 	runtime.ReadMemStats(&ms)
 	log.Printf("heap %.2f GB for population and network", float64(ms.HeapAlloc)/1e9)
 
-	srv := &server{w: w, s: s, cfg: cfg, running: *run}
+	srv := &server{w: w, s: s, cfg: cfg, running: *run,
+		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW}
+	if *gwURL != "" {
+		srv.relay = reaction.New(llm.New(*gwURL, *gwTok), *model, *rxCache)
+		log.Printf("model gateway %s (model %q, cache %s)", *gwURL, *model, *rxCache)
+	} else {
+		log.Printf("no -gateway set: the simulation runs, but nobody has an opinion " +
+			"the model wrote")
+	}
 	go srv.loop(time.Duration(*tickMS) * time.Millisecond)
 
 	mux := http.NewServeMux()
@@ -79,6 +107,11 @@ func main() {
 	mux.HandleFunc("/api/stats", srv.stats)
 	mux.HandleFunc("/api/control", srv.control)
 	mux.HandleFunc("/api/archetypes", srv.archetypes)
+	mux.HandleFunc("/api/breakdown", srv.breakdown)
+	mux.HandleFunc("/api/history", srv.history)
+	mux.HandleFunc("/api/relay", srv.relayStatus)
+	mux.HandleFunc("/api/generate", srv.generate)
+	mux.HandleFunc("/api/reactions", srv.reactions)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(rw, "ok")
 	})
@@ -208,6 +241,7 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 	srv.mu.Lock()
 	snap := srv.s.Snapshot(r.URL.Query().Get("degree") == "1")
 	running, last, where := srv.running, srv.lastEv, srv.lastWhere
+	tickMS, dirty, n := srv.s.TickMS, srv.s.DirtyCount(), srv.w.N
 	srv.mu.Unlock()
 
 	rw.Header().Set("Content-Type", "application/json")
@@ -216,6 +250,13 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 		"snapshot": snap, "running": running, "headline": last, "where": where,
 		"instance_bytes": world.InstanceBytes,
 		"archetypes":     world.NumArchetypes(),
+		"tick_ms":        tickMS,
+		"dirty":          dirty,
+		"wire": map[string]any{
+			"delta_bytes": 12 + 6*dirty,
+			"full_bytes":  12 + 2*n,
+			"form":        map[bool]string{true: "full", false: "delta"}[6*dirty >= 2*n],
+		},
 	})
 }
 
@@ -241,6 +282,196 @@ func (srv *server) control(rw http.ResponseWriter, r *http.Request) {
 
 	rw.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(rw, `{"running":%v}`, running)
+}
+
+func (srv *server) breakdown(rw http.ResponseWriter, r *http.Request) {
+	srv.mu.Lock()
+	b := srv.s.Breakdown()
+	srv.mu.Unlock()
+	writeJSON(rw, b)
+}
+
+func (srv *server) history(rw http.ResponseWriter, r *http.Request) {
+	srv.mu.Lock()
+	h := srv.s.History()
+	srv.mu.Unlock()
+	writeJSON(rw, map[string]any{"samples": h})
+}
+
+func (srv *server) relayStatus(rw http.ResponseWriter, r *http.Request) {
+	if srv.relay == nil {
+		writeJSON(rw, map[string]any{"enabled": false, "gateway": ""})
+		return
+	}
+	writeJSON(rw, map[string]any{
+		"enabled": true, "gateway": srv.gatewayURL, "progress": srv.relay.Progress(),
+	})
+}
+
+// reactions returns the generated lines for the current story, most engaged
+// first. This is the output a user actually reads, so it is ranked by how much
+// the archetype cares rather than by archetype id.
+func (srv *server) reactions(rw http.ResponseWriter, r *http.Request) {
+	if srv.relay == nil {
+		writeJSON(rw, map[string]any{"reactions": []any{}})
+		return
+	}
+	srv.mu.Lock()
+	story := srv.story
+	counts := make([]int, world.NumArchetypes())
+	for i := 0; i < srv.w.N; i++ {
+		if a := int(srv.w.Arch[i]); a < len(counts) {
+			counts[a]++
+		}
+	}
+	srv.mu.Unlock()
+
+	snap := srv.relay.Snapshot(story)
+	type row struct {
+		Role     string  `json:"role"`
+		Region   string  `json:"region"`
+		Stratum  string  `json:"stratum"`
+		Stance   float32 `json:"stance"`
+		Salience float32 `json:"salience"`
+		Share    float32 `json:"share"`
+		Line     string  `json:"line"`
+		Personas int     `json:"personas"`
+	}
+	out := make([]row, 0, len(snap))
+	for id, rx := range snap {
+		a := world.Archetype(id)
+		n := 0
+		if id < len(counts) {
+			n = counts[id]
+		}
+		out = append(out, row{
+			Role: a.Role().Name, Region: world.Regions[a.Region()].Name,
+			Stratum: world.Strata[a.Role().Stratum].Name,
+			Stance:  rx.Stance, Salience: rx.Salience, Share: rx.Share,
+			Line: rx.Line, Personas: n,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Salience > out[j].Salience })
+	writeJSON(rw, map[string]any{"story": story.Headline, "n": len(out), "reactions": out})
+}
+
+// generate walks the archetype manifest through the gateway and folds the
+// result back into the population.
+//
+// Runs in the background and returns immediately: a full pass is minutes, and
+// an HTTP handler that blocks for minutes is a handler that times out behind
+// every proxy between here and the browser. Progress is polled from /api/relay.
+func (srv *server) generate(rw http.ResponseWriter, r *http.Request) {
+	if srv.relay == nil {
+		http.Error(rw, "no model gateway configured (-gateway)", http.StatusPreconditionFailed)
+		return
+	}
+	var req struct {
+		Headline string  `json:"headline"`
+		Stance   float64 `json:"stance"`
+		Detail   string  `json:"detail"`
+		Limit    int     `json:"limit"` // 0 = every archetype carrying population
+	}
+	json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1<<16)).Decode(&req)
+	if req.Headline == "" {
+		srv.mu.Lock()
+		req.Headline = srv.lastEv
+		srv.mu.Unlock()
+	}
+	if req.Headline == "" {
+		http.Error(rw, "no story to react to; break one first", http.StatusBadRequest)
+		return
+	}
+
+	// Only archetypes that carry population. The empty cells are real cells --
+	// they just have nobody in them at this sample size, and generating for
+	// them would spend the budget on people who do not exist.
+	srv.mu.Lock()
+	counts := make([]int, world.NumArchetypes())
+	for i := 0; i < srv.w.N; i++ {
+		if a := int(srv.w.Arch[i]); a < len(counts) {
+			counts[a]++
+		}
+	}
+	srv.mu.Unlock()
+
+	ids := make([]int, 0, len(counts))
+	for id, n := range counts {
+		if n > 0 {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return counts[ids[i]] > counts[ids[j]] })
+	if req.Limit > 0 && req.Limit < len(ids) {
+		ids = ids[:req.Limit] // largest archetypes first, so a partial run covers most people
+	}
+
+	story := reaction.Story{Headline: req.Headline, Stance: req.Stance, Detail: req.Detail}
+	srv.mu.Lock()
+	srv.story = story
+	srv.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		// Fold results in as they arrive rather than at the end, so the globe
+		// starts moving within seconds of a run beginning instead of after
+		// every archetype has been waited for.
+		var pending = map[int]sim.ArchetypeReaction{}
+		var pmu sync.Mutex
+		flush := func() {
+			pmu.Lock()
+			if len(pending) == 0 {
+				pmu.Unlock()
+				return
+			}
+			batch := pending
+			pending = map[int]sim.ArchetypeReaction{}
+			pmu.Unlock()
+
+			srv.mu.Lock()
+			srv.s.ApplyReactions(batch, srv.applyW)
+			srv.mu.Unlock()
+		}
+
+		done := make(chan struct{})
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					flush()
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		err := srv.relay.Run(ctx, story, ids, srv.relayConc, func(rx reaction.Reaction) {
+			pmu.Lock()
+			pending[rx.Archetype] = sim.ArchetypeReaction{
+				Stance: rx.Stance, Salience: rx.Salience, Share: rx.Share,
+			}
+			pmu.Unlock()
+		})
+		close(done)
+		flush()
+
+		p := srv.relay.Progress()
+		log.Printf("generation finished: %d/%d done, %d from cache, %d failed, "+
+			"%d tokens in %.0fs (%.1f tok/s) err=%v",
+			p.Done, p.Total, p.FromCache, p.Failed, p.Tokens, p.ElapsedS, p.TokPerSec, err)
+	}()
+
+	writeJSON(rw, map[string]any{"started": true, "archetypes": len(ids)})
+}
+
+func writeJSON(rw http.ResponseWriter, v any) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(rw).Encode(v)
 }
 
 // archetypes is the generation manifest: exactly the list a batch job would

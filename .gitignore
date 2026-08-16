@@ -3,3 +3,8 @@
 *.test
 .env
 node_modules/
+
+# Generated reaction cache. Model output, grows with every story, and is
+# reproducible from the archetype manifest -- there is no reason to version it.
+/reactions.json
+/reactions.json.tmp

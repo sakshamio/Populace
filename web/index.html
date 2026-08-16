@@ -6,97 +6,238 @@
 <title>Populace</title>
 <style>
   :root{
-    --void:#0B0E14; --ink:#E6E9EF; --muted:#8992A3; --line:#232A38;
-    --accent:#3B5DC9; --warn:#D9773C;
+    --void:#0B0E14; --panel:#0F131B; --ink:#E6E9EF; --muted:#8992A3;
+    --line:#232A38; --line2:#1A2029;
+    --accent:#3B5DC9; --warn:#D9773C; --good:#4FA97B; --bad:#C8553D;
     --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{
     margin:0;background:var(--void);color:var(--ink);font-family:var(--mono);
-    display:flex;flex-direction:column;overflow:hidden;
+    display:flex;flex-direction:column;overflow:hidden;font-size:12px;
   }
   header{
     display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
-    padding:12px 16px;border-bottom:2px solid var(--line);
+    padding:10px 16px;border-bottom:2px solid var(--line);flex:none;
   }
   h1{font-size:14px;letter-spacing:.18em;text-transform:uppercase;margin:0}
   .sub{font-size:11px;color:var(--muted);letter-spacing:.06em}
-  main{flex:1;position:relative;min-height:0}
+
+  /* Globe left, instruments right. The panel sits beside the globe rather than
+     over it: an overlay hides the world it is describing, and the two are meant
+     to be read against each other. */
+  main{flex:1;display:flex;min-height:0}
+  .stage{flex:1;position:relative;min-width:0}
   canvas{display:block;width:100%;height:100%}
+
+  aside{
+    width:400px;flex:none;border-left:2px solid var(--line);background:var(--panel);
+    overflow-y:auto;overflow-x:hidden;
+  }
+  aside::-webkit-scrollbar{width:8px}
+  aside::-webkit-scrollbar-thumb{background:var(--line)}
+
+  .panel{border-bottom:1px solid var(--line2);padding:12px 14px}
+  .panel h2{
+    font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
+    margin:0 0 10px;display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+  }
+  .panel h2 em{font-style:normal;color:var(--ink);letter-spacing:.04em;text-transform:none}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px 12px}
+  .m{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .m .k{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .m .v{font-size:15px;font-variant-numeric:tabular-nums;line-height:1.15;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .m .v small{font-size:10px;color:var(--muted)}
+
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th{
+    font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+    text-align:right;font-weight:400;padding:0 0 5px;border-bottom:1px solid var(--line2);
+  }
+  th:first-child{text-align:left}
+  td{padding:3px 0;font-size:11px;text-align:right;white-space:nowrap}
+  td:first-child{text-align:left;color:var(--muted);white-space:normal;padding-right:8px}
+  .bar-cell{position:relative;width:66px}
+  .bar-cell i{position:absolute;left:0;top:3px;bottom:3px;background:var(--accent);opacity:.4}
+  .bar-cell span{position:relative}
+
+  .pos{color:var(--good)} .neg{color:var(--bad)} .zero{color:var(--muted)}
+
+  canvas.spark{display:block;width:100%;height:44px;background:#0A0D13;border:1px solid var(--line2)}
+  .sparkrow{display:flex;justify-content:space-between;font-size:9.5px;color:var(--muted);
+    letter-spacing:.08em;text-transform:uppercase;margin:8px 0 3px}
+
+  .quote{border-left:2px solid var(--line);padding:5px 0 5px 9px;margin:0 0 10px}
+  .quote .who{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+    display:flex;gap:5px;flex-wrap:wrap;align-items:baseline}
+  .quote .who b{color:var(--ink)}
+  .quote p{margin:4px 0 0;font-size:11.5px;line-height:1.45;color:var(--ink)}
+  .chip{font-size:9px;padding:1px 4px;border:1px solid var(--line);color:var(--muted)}
+
+  .track{height:5px;background:var(--line2);margin-top:9px;overflow:hidden}
+  .track i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
+
   .bar{
-    position:absolute;left:0;right:0;bottom:0;display:flex;gap:16px;
+    position:absolute;left:0;right:0;bottom:0;display:flex;gap:14px;
     flex-wrap:wrap;align-items:center;justify-content:space-between;
-    padding:10px 16px;background:rgba(11,14,20,.85);border-top:2px solid var(--line);
+    padding:9px 14px;background:rgba(11,14,20,.9);border-top:2px solid var(--line);
   }
-  .stats{display:flex;gap:18px;flex-wrap:wrap;font-size:11px;letter-spacing:.08em;
-    text-transform:uppercase;color:var(--muted);font-variant-numeric:tabular-nums}
-  .stats b{color:var(--ink)}
-  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .controls{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
   button,select{
-    font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
     font-weight:700;background:var(--accent);color:#fff;border:2px solid var(--accent);
-    padding:6px 12px;cursor:pointer;
+    padding:6px 11px;cursor:pointer;
   }
-  select{background:var(--void);color:var(--ink);border-color:var(--line)}
-  button:hover{background:var(--ink);color:var(--void);border-color:var(--ink)}
+  button.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
+  select{background:var(--void);color:var(--ink);border-color:var(--line);font-weight:400}
+  button:hover:not(:disabled){background:var(--ink);color:var(--void);border-color:var(--ink)}
+  button:disabled{opacity:.35;cursor:not-allowed}
   button:focus-visible,select:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
-  .key{display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px;color:var(--muted);
-    letter-spacing:.06em;text-transform:uppercase}
+  .key{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--muted);
+    letter-spacing:.05em;text-transform:uppercase}
   .sw{display:inline-block;width:9px;height:9px;margin-right:5px;vertical-align:-1px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;
+    background:var(--muted)}
+  .dot.on{background:var(--good)} .dot.off{background:var(--bad)}
+  .dot.busy{background:var(--warn)}
+
   #err{
-    position:absolute;inset:auto 16px 64px 16px;padding:12px 14px;
-    border:2px solid var(--warn);background:#33251A;font-size:12px;
+    position:absolute;inset:auto 14px 62px 14px;padding:11px 13px;
+    border:2px solid var(--warn);background:#33251A;font-size:11.5px;
     line-height:1.5;display:none;text-transform:none;letter-spacing:0;
+  }
+  .note{font-size:10px;color:var(--muted);line-height:1.55;margin:9px 0 0}
+
+  @media (max-width:1000px){
+    main{flex-direction:column}
+    aside{width:auto;border-left:0;border-top:2px solid var(--line);max-height:46vh}
   }
 </style>
 </head>
 <body>
 <header>
   <h1>Populace</h1>
-  <span class="sub" id="hdr">phase 4 — grounded archetypes, live on a real globe</span>
+  <span class="sub" id="hdr">no story yet — the world is at rest</span>
 </header>
 
 <main>
-  <canvas id="gl" aria-label="Rotating globe showing the simulated population"></canvas>
-  <div id="err" role="alert"></div>
-  <div class="bar">
-    <div class="stats">
-      <span>pop <b id="s-pop">—</b></span>
-      <span>fps <b id="s-fps">—</b></span>
-      <span>tick <b id="s-tick">0</b></span>
-      <span>reach <b id="s-reach">0.00%</b></span>
-      <span>split <b id="s-split">—</b></span>
-      <span>moved <b id="s-shift">—</b></span>
-      <span>ties <b id="s-edges">—</b></span>
-      <span>archetypes <b id="s-arch">—</b></span>
-      <span>load <b id="s-load">—</b></span>
-    </div>
-    <div class="controls">
-      <label class="sub" for="n">size</label>
-      <select id="n">
-        <option value="250000">250k</option>
-        <option value="1000000" selected>1M</option>
-        <option value="4000000">4M</option>
-        <option value="10000000">10M</option>
-      </select>
-      <button id="reload" type="button">Load</button>
-      <button id="fire" type="button">Break a story</button>
-      <button id="pause" type="button">Pause</button>
-      <button id="reset" type="button">Reset</button>
+  <div class="stage">
+    <canvas id="gl" aria-label="Rotating globe showing the simulated population"></canvas>
+    <div id="err" role="alert"></div>
+    <div class="bar">
+      <div class="key">
+        <span><i class="sw" style="background:#4A5568"></i>hasn&rsquo;t heard</span>
+        <span><i class="sw" style="background:#4C73DA"></i>against</span>
+        <span><i class="sw" style="background:#E58A3E"></i>in favour</span>
+        <span>bright = carrying it &middot; dim = moved on</span>
+      </div>
+      <div class="controls">
+        <select id="n" aria-label="population size">
+          <option value="250000">250k</option>
+          <option value="1000000" selected>1M</option>
+          <option value="4000000">4M</option>
+          <option value="10000000">10M</option>
+        </select>
+        <button id="reload" type="button" class="ghost">Load</button>
+        <button id="fire" type="button">Break a story</button>
+        <button id="gen" type="button">Ask the model</button>
+        <button id="pause" type="button" class="ghost">Pause</button>
+        <button id="reset" type="button" class="ghost">Reset</button>
+      </div>
     </div>
   </div>
-</main>
 
-<div class="bar" style="position:static;border-top:0;border-bottom:2px solid var(--line);background:transparent">
-  <div class="key">
-    <span><i class="sw" style="background:#4A5568"></i>hasn&rsquo;t heard</span>
-    <span><i class="sw" style="background:#4C73DA"></i>against</span>
-    <span><i class="sw" style="background:#E58A3E"></i>in favour</span>
-    <span>brightness = carrying the story · dim = attention moved on</span>
-    <span>weighted sample, not a headcount</span>
-  </div>
-</div>
+  <aside>
+    <section class="panel">
+      <h2>This story <em id="p-where"></em></h2>
+      <div class="grid">
+        <div class="m"><span class="k">reach</span><span class="v" id="p-reach">—</span></div>
+        <div class="m"><span class="k">adopters</span><span class="v" id="p-adopters">—</span></div>
+        <div class="m"><span class="k">tick</span><span class="v" id="p-tick">—</span></div>
+      </div>
+      <div class="grid" style="margin-top:10px">
+        <div class="m"><span class="k">moved against</span><span class="v" id="p-dneg">—</span></div>
+        <div class="m"><span class="k">moved for</span><span class="v" id="p-dpos">—</span></div>
+        <div class="m"><span class="k">now split</span><span class="v" id="p-split">—</span></div>
+      </div>
+      <p class="note">Shift, not level: the level is mostly what this population
+      already believed, which the story did not cause.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Cascade</h2>
+      <div class="sparkrow"><span>reach</span><span id="sp-reach-max"></span></div>
+      <canvas class="spark" id="sp-reach"></canvas>
+      <div class="sparkrow"><span>new adopters / tick</span><span id="sp-new-max"></span></div>
+      <canvas class="spark" id="sp-new"></canvas>
+      <div class="sparkrow"><span>opinion shift</span><span id="sp-shift-max"></span></div>
+      <canvas class="spark" id="sp-shift"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>The model <em id="p-gw"></em></h2>
+      <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">
+        <span class="dot" id="p-gwdot"></span><span id="p-gwtxt">not configured</span>
+      </div>
+      <div class="grid" style="margin-top:9px">
+        <div class="m"><span class="k">generated</span><span class="v" id="p-gen">—</span></div>
+        <div class="m"><span class="k">from cache</span><span class="v" id="p-cache">—</span></div>
+        <div class="m"><span class="k">failed</span><span class="v" id="p-fail">—</span></div>
+      </div>
+      <div class="grid" style="margin-top:9px">
+        <div class="m"><span class="k">tok/s</span><span class="v" id="p-tps">—</span></div>
+        <div class="m"><span class="k">elapsed</span><span class="v" id="p-elapsed">—</span></div>
+        <div class="m"><span class="k">eta</span><span class="v" id="p-eta">—</span></div>
+      </div>
+      <div class="track"><i id="p-track"></i></div>
+      <p class="note" id="p-relayerr" style="color:var(--warn);display:none"></p>
+    </section>
+
+    <section class="panel">
+      <h2>What people said <em id="p-rxn"></em></h2>
+      <div id="p-quotes"><p class="note">Break a story, then ask the model.</p></div>
+    </section>
+
+    <section class="panel">
+      <h2>By region</h2>
+      <table id="t-region"><thead><tr>
+        <th>region</th><th>pop</th><th>reach</th><th>moved</th><th>ties</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="panel">
+      <h2>By stratum</h2>
+      <table id="t-stratum"><thead><tr>
+        <th>stratum</th><th>pop</th><th>reach</th><th>moved</th><th>ties</th>
+      </tr></thead><tbody></tbody></table>
+      <p class="note">Population shares are importance-weighted. Rare strata are
+      deliberately oversampled, so raw counts are not estimates of anything.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Engine</h2>
+      <div class="grid">
+        <div class="m"><span class="k">personas</span><span class="v" id="e-pop">—</span></div>
+        <div class="m"><span class="k">ties</span><span class="v" id="e-edges">—</span></div>
+        <div class="m"><span class="k">archetypes</span><span class="v" id="e-arch">—</span></div>
+      </div>
+      <div class="grid" style="margin-top:9px">
+        <div class="m"><span class="k">tick cost</span><span class="v" id="e-tick">—</span></div>
+        <div class="m"><span class="k">render</span><span class="v" id="e-fps">—</span></div>
+        <div class="m"><span class="k">draw calls</span><span class="v">1</span></div>
+      </div>
+      <div class="grid" style="margin-top:9px">
+        <div class="m"><span class="k">state frame</span><span class="v" id="e-form">—</span></div>
+        <div class="m"><span class="k">on the wire</span><span class="v" id="e-wire">—</span></div>
+        <div class="m"><span class="k">instances</span><span class="v" id="e-load">—</span></div>
+      </div>
+      <p class="note" id="e-wirenote"></p>
+    </section>
+  </aside>
+</main>
 
 <script type="module">
 import { Globe } from './globe.js';
@@ -108,23 +249,208 @@ function fail(e) {
   err.textContent = String(e && e.message ? e.message : e);
   console.error(e);
 }
-const pct = (v) => (v * 100).toFixed(2) + '%';
+const pct   = (v, d = 2) => (v * 100).toFixed(d) + '%';
+const pp    = (v) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2);
+const num   = (v) => (v ?? 0).toLocaleString();
+const secs  = (v) => v >= 60 ? `${Math.floor(v / 60)}m ${Math.round(v % 60)}s` : `${Math.round(v)}s`;
+const bytes = (b) => b >= 1e6 ? (b / 1e6).toFixed(2) + ' MB'
+                   : b >= 1e3 ? (b / 1e3).toFixed(1) + ' kB' : b + ' B';
+const cls   = (v) => Math.abs(v) < 5e-5 ? 'zero' : v > 0 ? 'pos' : 'neg';
+const esc   = (s) => String(s).replace(/[<>&]/g, c => ({ '<':'&lt;', '>':'&gt;', '&':'&amp;' }[c]));
 
 let globe;
 try {
   globe = new Globe($('gl'), ({ n, fps, tick }) => {
-    $('s-pop').textContent = n.toLocaleString();
-    $('s-fps').textContent = fps;
-    $('s-tick').textContent = tick;
+    $('e-pop').textContent = num(n);
+    $('e-fps').textContent = fps + ' fps';
+    $('p-tick').textContent = tick;
   });
   globe.start();
 } catch (e) {
   fail(e);
 }
 
+// --- sparklines ---------------------------------------------------------
+// Drawn by hand on a canvas rather than pulled from a chart library: the CSP an
+// Artifact and a Railway deploy both run under blocks external scripts, and
+// three series of at most 1800 points do not need 200 kB of abstraction.
+function spark(canvas, values, { fill = '#3B5DC9', zero = false } = {}) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = canvas.clientWidth || 300, h = canvas.clientHeight || 44;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (!values.length) return;
+
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (zero) { const m = Math.max(Math.abs(lo), Math.abs(hi), 1e-9); lo = -m; hi = m; }
+  if (hi - lo < 1e-12) hi = lo + 1e-12;
+  const x = (i) => (i / Math.max(values.length - 1, 1)) * (w - 2) + 1;
+  const y = (v) => h - 2 - ((v - lo) / (hi - lo)) * (h - 4);
+
+  if (zero) {                        // baseline, so the sign reads at a glance
+    g.strokeStyle = '#232A38'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y(0)); g.lineTo(w, y(0)); g.stroke();
+  }
+  const base = y(zero ? 0 : lo);
+  g.beginPath();
+  g.moveTo(x(0), y(values[0]));
+  for (let i = 1; i < values.length; i++) g.lineTo(x(i), y(values[i]));
+  g.lineTo(x(values.length - 1), base);
+  g.lineTo(x(0), base);
+  g.closePath();
+  g.fillStyle = fill + '33'; g.fill();
+
+  g.beginPath();
+  g.moveTo(x(0), y(values[0]));
+  for (let i = 1; i < values.length; i++) g.lineTo(x(i), y(values[i]));
+  g.strokeStyle = fill; g.lineWidth = 1.5; g.stroke();
+
+  g.fillStyle = fill;                // emphasised endpoint: the current value
+  g.fillRect(x(values.length - 1) - 1.5, y(values[values.length - 1]) - 1.5, 3, 3);
+}
+
+// --- polling ------------------------------------------------------------
+// Six loops at different rates, because the costs differ by orders of
+// magnitude: a state frame can be megabytes, a breakdown is a full weighted
+// scan of the population, relay progress is three atomic loads.
+async function getJSON(url) {
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    return r.ok ? await r.json() : null;
+  } catch (e) { return null; }       // a dropped poll is not worth a banner
+}
+
+let polling = false;
+async function pollState() {
+  if (polling || !globe || !globe.n) return;
+  polling = true;
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (res.ok) globe.applyFrame(await res.arrayBuffer());
+  } catch (e) { /* dropped frame */ }
+  polling = false;
+}
+
+async function pollStats() {
+  const d = await getJSON('/api/stats');
+  if (!d) return;
+  const s = d.snapshot;
+  $('p-reach').textContent = pct(s.reach);
+  $('p-adopters').textContent = num(s.adopters);
+  $('p-dneg').textContent = pp(s.share_against_shift) + 'pp';
+  $('p-dneg').className = 'v ' + cls(s.share_against_shift);
+  $('p-dpos').textContent = pp(s.share_for_shift) + 'pp';
+  $('p-dpos').className = 'v ' + cls(s.share_for_shift);
+  $('p-split').innerHTML = `${pct(s.share_against, 1)}<small> / </small>${pct(s.share_for, 1)}`;
+  $('p-where').textContent = d.where && d.where !== 'nowhere' ? d.where : '';
+
+  $('e-edges').textContent = num(s.edges);
+  $('e-arch').textContent = d.archetypes;
+  $('e-tick').textContent = (d.tick_ms ?? 0).toFixed(1) + ' ms';
+  $('e-form').textContent = d.wire.form;
+  $('e-wire').textContent = bytes(d.wire.form === 'full' ? d.wire.full_bytes : d.wire.delta_bytes);
+  $('e-wirenote').textContent =
+    `${num(d.dirty)} personas changed since the last frame. A delta costs 6 bytes ` +
+    `each (${bytes(d.wire.delta_bytes)}), a full resend 2 (${bytes(d.wire.full_bytes)}) — ` +
+    `the server sends whichever is smaller.`;
+  $('pause').textContent = d.running ? 'Pause' : 'Resume';
+}
+
+async function pollSeries() {
+  const d = await getJSON('/api/history');
+  if (!d || !d.samples) return;
+  const s = d.samples;
+  const reach = s.map(x => x.reach), fresh = s.map(x => x.new), shift = s.map(x => x.shift);
+  spark($('sp-reach'), reach);
+  spark($('sp-new'), fresh, { fill: '#D9773C' });
+  spark($('sp-shift'), shift, { fill: '#4FA97B', zero: true });
+  $('sp-reach-max').textContent = reach.length ? 'peak ' + pct(Math.max(...reach)) : '';
+  $('sp-new-max').textContent = fresh.length ? 'peak ' + num(Math.max(...fresh)) : '';
+  $('sp-shift-max').textContent = shift.length ? 'now ' + pp(shift.at(-1)) + 'pp' : '';
+}
+
+function fillTable(id, rows) {
+  const body = $(id).querySelector('tbody');
+  const maxReach = Math.max(...rows.map(r => r.reach), 1e-9);
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.name)}</td>
+      <td>${pct(r.share, 1)}</td>
+      <td class="bar-cell"><i style="width:${(r.reach / maxReach * 100).toFixed(1)}%"></i>
+          <span>${pct(r.reach, 1)}</span></td>
+      <td class="${cls(r.shift)}">${pp(r.shift)}</td>
+      <td>${r.mean_ties.toFixed(1)}</td>
+    </tr>`).join('');
+}
+
+async function pollBreakdown() {
+  const d = await getJSON('/api/breakdown');
+  if (!d) return;
+  if (d.regions) fillTable('t-region', d.regions.slice().sort((a, b) => b.reach - a.reach));
+  if (d.strata) fillTable('t-stratum', d.strata);
+}
+
+async function pollRelay() {
+  const d = await getJSON('/api/relay');
+  if (!d) return;
+  const dot = $('p-gwdot'), txt = $('p-gwtxt');
+  if (!d.enabled) {
+    dot.className = 'dot';
+    txt.textContent = 'not configured — start populace with -gateway';
+    $('gen').disabled = true;
+    return;
+  }
+  $('p-gw').textContent = d.gateway.replace(/^https?:\/\//, '');
+  const p = d.progress;
+  dot.className = 'dot ' + (p.running ? 'busy' : p.last_error ? 'off' : 'on');
+  txt.textContent = p.running
+    ? `generating — ${p.done} of ${p.total}`
+    : p.total ? `idle — last run ${p.done}/${p.total}, cache holds ${p.cache_size}`
+              : `idle — cache holds ${p.cache_size}`;
+
+  $('p-gen').textContent = num(p.done - p.from_cache);
+  $('p-cache').textContent = num(p.from_cache);
+  $('p-fail').textContent = num(p.failed);
+  $('p-fail').className = 'v ' + (p.failed ? 'neg' : 'zero');
+  $('p-tps').textContent = p.tok_per_sec ? p.tok_per_sec.toFixed(1) : '—';
+  $('p-elapsed').textContent = p.elapsed_s ? secs(p.elapsed_s) : '—';
+  $('p-eta').textContent = p.running && p.eta_s ? secs(p.eta_s) : '—';
+  $('p-track').style.width = p.total ? (p.done / p.total * 100).toFixed(1) + '%' : '0%';
+  $('gen').disabled = p.running;
+
+  const e = $('p-relayerr');
+  if (p.last_error) { e.style.display = 'block'; e.textContent = 'last error: ' + p.last_error; }
+  else e.style.display = 'none';
+}
+
+async function pollQuotes() {
+  const d = await getJSON('/api/reactions');
+  if (!d) return;
+  $('p-rxn').textContent = d.n ? `${d.n} archetypes` : '';
+  if (!d.reactions || !d.reactions.length) return;
+  // Ranked by how much the archetype cares, not by how strongly they feel.
+  // Ranking by stance would show only the loudest, which is the sampling error
+  // the strata exist to avoid.
+  $('p-quotes').innerHTML = d.reactions.slice(0, 8).map(r => `
+    <div class="quote">
+      <div class="who">
+        <b>${esc(r.role)}</b>
+        <span>${esc(r.region)}</span>
+        <span class="chip">${esc(r.stratum)}</span>
+        <span class="chip ${cls(r.stance)}">stance ${r.stance >= 0 ? '+' : ''}${r.stance.toFixed(2)}</span>
+        <span class="chip">cares ${r.salience.toFixed(2)}</span>
+        <span class="chip">${num(r.personas)} here</span>
+      </div>
+      <p>${esc(r.line)}</p>
+    </div>`).join('');
+}
+
+// --- actions ------------------------------------------------------------
 async function load() {
   const n = $('n').value;
-  $('s-load').textContent = 'fetching…';
+  $('e-load').textContent = '…';
   const t0 = performance.now();
   try {
     const res = await fetch(`/api/instances?n=${n}`);
@@ -133,52 +459,21 @@ async function load() {
     const fetched = performance.now();
     globe.load(buf);
     const done = performance.now();
-    $('s-load').textContent =
-      `${(buf.byteLength / 1e6).toFixed(1)} MB · ${Math.round(fetched - t0)} ms net · ${Math.round(done - fetched)} ms upload`;
+    $('e-load').textContent = `${(buf.byteLength / 1e6).toFixed(0)} MB`;
     err.style.display = 'none';
+    console.log(`instances: ${Math.round(fetched - t0)} ms over the wire, ` +
+                `${Math.round(done - fetched)} ms to the GPU`);
+    pollState();
   } catch (e) {
-    $('s-load').textContent = 'failed';
+    $('e-load').textContent = 'failed';
     fail(e);
   }
 }
 
-// State and statistics are polled separately and at different rates on
-// purpose: the flags frame is the one that can be megabytes, and there is no
-// reason to re-derive weighted aggregates over the whole population just to
-// keep a number in a status bar moving.
-let polling = false;
-async function pollState() {
-  if (polling || !globe || !globe.n) return;
-  polling = true;
-  try {
-    const res = await fetch('/api/state', { cache: 'no-store' });
-    if (res.ok) globe.applyFrame(await res.arrayBuffer());
-  } catch (e) { /* a dropped frame is not worth an error banner */ }
-  polling = false;
-}
-
-async function pollStats() {
-  try {
-    const res = await fetch('/api/stats', { cache: 'no-store' });
-    if (!res.ok) return;
-    const { snapshot: s, running, archetypes } = await res.json();
-    $('s-reach').textContent = pct(s.reach);
-    $('s-split').textContent =
-      `${pct(s.share_against)} / ${pct(s.share_for)}`;
-    // The shift, not the level: the level is mostly what the population
-    // already believed, which this story did not cause.
-    const sh = (v) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 'pp';
-    $('s-shift').textContent = `${sh(s.share_against_shift)} against`;
-    $('s-edges').textContent = s.edges.toLocaleString();
-    $('s-arch').textContent = archetypes;
-    $('pause').textContent = running ? 'Pause' : 'Resume';
-  } catch (e) { /* same */ }
-}
-
-// [headline, stance, difficulty]. Difficulty is how much the reaction costs
-// the person having it: passing on a leaked memo is nearly free, changing what
-// you buy or how you vote is not. Without that third number every story on a
-// given population tips or fizzles together, which would say more about the
+// [headline, stance, difficulty]. Difficulty is how much the reaction costs the
+// person having it: passing on a leaked memo is nearly free, changing what you
+// buy or how you vote is not. Without that third number every story on a given
+// population tips or fizzles together, which would say more about the
 // parameters than about the news.
 const HEADLINES = [
   ['Regulator opens inquiry into the largest carrier', -0.8, 1.4],
@@ -188,46 +483,74 @@ const HEADLINES = [
   ['Trial results published for the new treatment',     0.8, 1.1],
   ['Two carriers announce a merger',                   -0.5, 2.6],
 ];
+let current = null;
 
 async function post(url, body) {
   const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return res.ok ? res.json() : null;
+  if (res.ok) return res.json();
+  throw new Error(`${res.status}: ${(await res.text()).trim() || res.statusText}`);
 }
 
 $('reload').addEventListener('click', load);
+
 $('reset').addEventListener('click', async () => {
-  await post('/api/control', { reset: true });
-  pollStats();
+  try { await post('/api/control', { reset: true }); } catch (e) { return fail(e); }
+  current = null;
+  $('hdr').textContent = 'no story yet — the world is at rest';
+  $('p-quotes').innerHTML = '<p class="note">Break a story, then ask the model.</p>';
+  refresh();
 });
+
 $('pause').addEventListener('click', async () => {
-  const running = $('pause').textContent === 'Pause';
-  await post('/api/control', { running: !running });
-  pollStats();
-});
-$('fire').addEventListener('click', async () => {
-  const [headline, stance, difficulty] = HEADLINES[(Math.random() * HEADLINES.length) | 0];
-  $('hdr').textContent = headline + ' — breaking…';
-  // Seeded in a region rather than scattered worldwide: a complex contagion
-  // started by scattering the same number of seeds does not start at all --
-  // nobody gets the second exposure the threshold rule requires.
-  //
-  // The seed is a *fraction* of the population, not a fixed count, because
-  // that is what reach actually tracks: seeding 1% reaches ~1.4% at sixty
-  // thousand and at one million alike. A fixed 300 people would be a story at
-  // small scale and a rounding error at large.
-  const seed_size = Math.max(400, Math.round(globe.n / 100));
-  const r = await post('/api/event', { headline, stance, salience: 0.7, seeding: 'region', seed_size, difficulty });
-  if (r) $('hdr').textContent = `${headline} — breaking in ${r.where}`;
+  try { await post('/api/control', { running: $('pause').textContent !== 'Pause' }); }
+  catch (e) { return fail(e); }
   pollStats();
 });
 
+$('fire').addEventListener('click', async () => {
+  const [headline, stance, difficulty] = HEADLINES[(Math.random() * HEADLINES.length) | 0];
+  current = { headline, stance, difficulty };
+  $('hdr').textContent = headline + ' — breaking…';
+  // Seeded in a place, and as a *fraction* of the population: reach tracks the
+  // seeded fraction, so a fixed count would be a story at small scale and a
+  // rounding error at large.
+  const seed_size = Math.max(400, Math.round(globe.n / 100));
+  try {
+    const r = await post('/api/event',
+      { headline, stance, salience: 0.7, seeding: 'region', seed_size, difficulty });
+    $('hdr').textContent = `${headline} — breaking in ${r.where}`;
+    err.style.display = 'none';
+  } catch (e) { fail(e); }
+  refresh();
+});
+
+$('gen').addEventListener('click', async () => {
+  if (!current) return fail(new Error('Break a story first — the model needs something to react to.'));
+  try {
+    await post('/api/generate', { headline: current.headline, stance: current.stance });
+    err.style.display = 'none';
+  } catch (e) {
+    fail(new Error(`Generation refused — ${e.message}. Start populace with -gateway to enable it.`));
+  }
+  pollRelay();
+});
+
+function refresh() { pollStats(); pollBreakdown(); pollSeries(); pollQuotes(); }
+
 setInterval(pollState, 400);
 setInterval(pollStats, 1000);
+setInterval(pollRelay, 1000);
+setInterval(pollSeries, 1500);
+setInterval(pollQuotes, 4000);
+setInterval(pollBreakdown, 3000);   // a full weighted scan of the population
+window.addEventListener('resize', pollSeries);
+
 load();
+refresh();
+pollRelay();
 </script>
 </body>
 </html>
