@@ -162,6 +162,12 @@
   /* The group chat view: a phone-shaped transcript beside the six people. */
   #chatview{position:absolute;inset:0 0 62px 0;background:var(--void);
     display:flex;flex-direction:column;z-index:3;overflow:hidden}
+  /* [hidden] as an attribute selector loses to the ID selector above on
+     specificity, so the browser's built-in "display:none" for [hidden] was
+     silently beaten by our own display:flex -- the chat view rendered over
+     the globe at all times regardless of which tab was selected. This rule
+     has to out-specify #chatview itself to win. */
+  #chatview[hidden]{display:none}
   .chathead{padding:52px 20px 12px;border-bottom:1px solid var(--line2);flex:none}
   .chathead h3{margin:0;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
     display:flex;gap:10px;align-items:baseline}
