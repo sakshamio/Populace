@@ -43,12 +43,12 @@ fi
 # 2. Create the tunnel, or adopt the existing one. `create` is not idempotent --
 #    it errors on a duplicate name -- so ask first.
 ID=$("$CFD" tunnel list --output json 2>/dev/null \
-     | python3 -c "import json,sys;print(next((t['id'] for t in json.load(sys.stdin) if t['name']=='$TUNNEL'),''))")
+     | python3 -c "import json,sys;print(next((t['id'] for t in (json.load(sys.stdin) or []) if t['name']=='$TUNNEL'),''))")
 if [ -z "$ID" ]; then
   echo "==> creating tunnel $TUNNEL"
   "$CFD" tunnel create "$TUNNEL"
   ID=$("$CFD" tunnel list --output json \
-       | python3 -c "import json,sys;print(next(t['id'] for t in json.load(sys.stdin) if t['name']=='$TUNNEL'))")
+       | python3 -c "import json,sys;print(next(t['id'] for t in (json.load(sys.stdin) or []) if t['name']=='$TUNNEL'))")
 fi
 echo "==> tunnel $TUNNEL is $ID"
 

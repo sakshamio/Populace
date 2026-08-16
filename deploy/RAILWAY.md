@@ -139,12 +139,16 @@ curl -s localhost:8099/api/stats | head -c 120                          # real n
 Each step fails differently, which is the point of the order.
 
 ```sh
-# 1. Is the tunnel connected? (from anywhere)
+# 1. Is the path up? (from anywhere)
 curl -s -o /dev/null -w '%{http_code}\n' https://gateway.<domain>/v1/chat/completions \
   -X POST -H 'content-type: application/json' -d '{}'
-#    401 -> tunnel + gateway both fine
-#    502 -> tunnel up, gateway down       -> systemctl --user status populace-gateway
-#    530 -> tunnel not connected          -> systemctl --user status cloudflared
+#    401 -> tunnel + gateway both fine, and auth is working
+#    502 -> something behind the edge is down. Measured: a dead cloudflared and
+#           a dead gateway BOTH return 502, so this code does not tell you
+#           which. Do not guess -- ask the machine:
+#             systemctl --user is-active cloudflared populace-gateway
+#    1033/530 -> the DNS record exists but no tunnel has ever connected to it,
+#           which is a setup fault rather than an outage. Re-run setup-tunnel.sh.
 
 # 2. Does auth work end to end?
 curl -sS https://gateway.<domain>/v1/chat/completions \
@@ -161,6 +165,22 @@ Unlike the tailnet setup, **all of these work from the Spark itself**. In
 userspace Tailscale a machine has no route to its own tailnet IP, so a
 self-`curl` failed and proved nothing; the tunnel hostname resolves and works
 from everywhere, including the origin.
+
+## Self-healing, measured
+
+Both halves were killed deliberately and timed against the public hostname:
+
+| fault | response during | recovery |
+|---|---|---|
+| `kill -9` the tunnel | `502` | **~5 s**, systemd `Restart=always`, `NRestarts=1` |
+| `systemctl stop` the gateway | `502` | **~3 s**, tunnel never dropped |
+
+The second row is why the unit says `Wants=populace-gateway` and not
+`Requires=`. On `Requires=`, stopping the gateway would tear the tunnel down
+with it, and a tunnel has to re-establish its edge connection and re-advertise
+the route — turning a three-second gateway restart into a multi-minute outage.
+Keeping the tunnel up through an origin failure is what makes the outage as
+short as the thing that actually broke.
 
 ## What happens when the Spark is offline
 
