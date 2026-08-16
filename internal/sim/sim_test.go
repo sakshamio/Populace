@@ -570,3 +570,43 @@ func TestDifficultySeparatesStoriesThatTipFromThoseThatDont(t *testing.T) {
 	t.Logf("  low-cost reaction  (x0.6): %6.2f%% adopt", easy*100)
 	t.Logf("  high-cost reaction (x2.0): %6.2f%% adopt", hard*100)
 }
+
+// ApplyReactions lowers adoption thresholds, which are a property of the
+// population and not of the story. If Reset does not restore them, the second
+// story a server ever runs is measured on a population the first story left
+// behind -- and nothing in any aggregate would look wrong.
+func TestResetRestoresThresholdsTheModelMoved(t *testing.T) {
+	w := testWorld(t, 20_000)
+	cfg := DefaultConfig()
+	s := New(w, cfg)
+
+	before := make([]float32, len(s.C.Threshold))
+	copy(before, s.C.Threshold)
+
+	// An archetype that tells everyone: maximum threshold reduction.
+	rx := map[int]ArchetypeReaction{}
+	for i := 0; i < w.N; i++ {
+		rx[int(w.Arch[i])] = ArchetypeReaction{Stance: -1, Salience: 1, Share: 1}
+	}
+	s.ApplyReactions(rx, 1)
+
+	moved := 0
+	for i := range before {
+		if s.C.Threshold[i] != before[i] {
+			moved++
+		}
+	}
+	if moved == 0 {
+		t.Fatal("ApplyReactions did not move any thresholds; the test proves nothing")
+	}
+
+	s.Reset(cfg)
+	for i := range before {
+		if s.C.Threshold[i] != before[i] {
+			t.Fatalf("persona %d kept a threshold the last story gave it: %v, want %v",
+				i, s.C.Threshold[i], before[i])
+		}
+	}
+	t.Logf("%d of %d thresholds were moved by the model and all were restored",
+		moved, len(before))
+}

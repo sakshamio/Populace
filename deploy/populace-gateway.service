@@ -1,0 +1,40 @@
+[Unit]
+Description=Populace model gateway (auth, admission control, cache)
+Documentation=https://github.com/sakshamio/Populace/blob/main/deploy/RAILWAY.md
+After=network-online.target
+# Rate-limit restarts. These belong in [Unit]: systemd accepts them in
+# [Service] and silently ignores them, so the protection would have
+# existed only in this comment.
+#
+# The budget must span a long enough WALL CLOCK window to tell a transient
+# fault from a broken binary. The first version -- 6 failures in 300s at
+# RestartSec=5 -- was exhausted in thirty seconds by a port held briefly during
+# a redeploy, and systemd then refused to start the service at all. A service
+# that permanently disables itself over a transient conflict is the opposite of
+# self-healing. Ten attempts at 10s apart covers ~100s of flapping; anything
+# still failing after that is a real fault and should stop and be looked at.
+#
+# To clear it by hand after a genuine fault: systemctl --user reset-failed <unit>
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sakshamio/Populace
+# The token lives in the environment file, not here: this unit is committed to
+# a public repository and a bearer token in it would be a published credential.
+EnvironmentFile=/home/sakshamio/.config/populace-gateway.env
+ExecStart=/home/sakshamio/Populace/bin/gateway \
+  -addr 127.0.0.1:8091 \
+  -upstream http://127.0.0.1:30000 \
+  -in-flight 8 -batch-cap 6 \
+  -rate 6000 -cache-mb 512
+
+Restart=always
+RestartSec=10s
+
+StandardOutput=append:/home/sakshamio/populace-gateway.log
+StandardError=append:/home/sakshamio/populace-gateway.log
+
+[Install]
+WantedBy=default.target

@@ -73,6 +73,13 @@ type Contagion struct {
 
 	Seed uint64
 	next []uint8
+
+	// baseThreshold is the population's own thresholds, before any story
+	// modified them. ApplyReactions lowers Threshold per archetype, and
+	// without a pristine copy a second run silently inherits the first run's
+	// model output -- which contaminates any comparison between two stories
+	// and is invisible in every aggregate.
+	baseThreshold []float32
 }
 
 // ContagionConfig describes how hard a behaviour is to adopt.
@@ -134,6 +141,8 @@ func NewContagion(w *world.World, cfg ContagionConfig) *Contagion {
 			c.Threshold[i] = float32(clampF(t, 0.01, 1.0))
 		}
 	})
+	c.baseThreshold = make([]float32, w.N)
+	copy(c.baseThreshold, c.Threshold)
 	return c
 }
 
@@ -258,6 +267,11 @@ func (c *Contagion) Reset() {
 	for i := range c.State {
 		c.State[i] = Unaware
 		c.AdoptedAt[i] = -1
+	}
+	// Thresholds too: they are population state, not story state, and
+	// ApplyReactions has almost certainly moved them.
+	if c.baseThreshold != nil {
+		copy(c.Threshold, c.baseThreshold)
 	}
 	c.Step = 0
 	c.ThresholdScale = 1

@@ -206,6 +206,34 @@ export class Globe {
     return count;
   }
 
+  // Turns a click into a point on the sphere, or null if it missed.
+  //
+  // This inverts the vertex shader exactly rather than approximating it. The
+  // shader maps a unit-sphere point p to NDC as p.xy * R / (res/2), so the
+  // inverse is p.xy = ndc * (res/2) / R, and z falls out of the unit-length
+  // constraint -- taking the positive root because the far hemisphere is
+  // discarded by the same backface test the fragment shader uses.
+  //
+  // Keeping this in lockstep with the shader matters: an approximate
+  // unprojection would return a person a few degrees from the one under the
+  // cursor, which reads as the inspector being wrong about who lives where.
+  pick(clientX, clientY) {
+    const rect = this.cv.getBoundingClientRect();
+    const ndcx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcy = 1 - ((clientY - rect.top) / rect.height) * 2;
+
+    const px = ndcx * (this.W * 0.5) / this.R;
+    const py = ndcy * (this.H * 0.5) / this.R;
+    const r2 = px * px + py * py;
+    if (r2 > 1) return null;                  // clicked past the limb
+    const pz = Math.sqrt(1 - r2);
+
+    const lat = Math.asin(py);
+    let lon = Math.atan2(px, pz) - this.rot;  // undo the spin
+    lon = ((lon + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+    return { lon, lat };
+  }
+
   resize() {
     const gl = this.gl;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);

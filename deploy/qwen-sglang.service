@@ -1,0 +1,46 @@
+[Unit]
+Description=Qwen3.8-27B on SGLang (the model server Populace talks to)
+After=network-online.target
+# No Requires=docker.service: that is a *system* unit and this is a --user
+# unit, so systemd cannot order the two and the dependency would simply fail to
+# resolve. ExecStartPre waits for the socket instead, which is the thing that
+# actually has to be ready.
+# Rate-limit restarts. These belong in [Unit]: systemd accepts them in
+# [Service] and silently ignores them, so the protection would have
+# existed only in this comment.
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# The script runs docker with --rm and a fixed container name, so a container
+# left behind by an unclean shutdown would block the next start. Remove it
+# first and ignore the failure when there is nothing to remove.
+# Wait for the Docker socket rather than declaring a dependency systemd cannot
+# enforce across the user/system boundary.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker never became ready"; exit 1'
+ExecStartPre=-/usr/bin/docker rm -f qwen38
+ExecStart=/home/sakshamio/kimi-k3-inference/deploy/run_qwen38_sglang.sh
+ExecStop=/usr/bin/docker stop -t 30 qwen38
+
+# Readiness, not liveness. SGLang answers /health as soon as the HTTP server is
+# up, which is minutes before it can generate -- weights still loading, CUDA
+# graphs still capturing. Anything that gates on /health will send the first
+# request into a connection reset. /health_generate actually runs the model.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 90); do curl -sf -m 5 -o /dev/null http://127.0.0.1:30000/health_generate && exit 0; sleep 10; done; echo "model never became ready to generate"; exit 1'
+
+
+Restart=always
+RestartSec=30s
+
+# Weight load plus CUDA graph capture is ~500s on this hardware, measured. A
+# shorter start timeout would kill it mid-capture every single boot.
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+
+StandardOutput=append:/home/sakshamio/qwen-sglang.log
+StandardError=append:/home/sakshamio/qwen-sglang.log
+
+[Install]
+WantedBy=default.target

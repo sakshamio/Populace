@@ -67,13 +67,13 @@ func TestCacheKeyTracksTheStory(t *testing.T) {
 	a := Story{Headline: "Rates held", Stance: -0.2}
 	b := Story{Headline: "Rates held", Stance: 0.6}
 	c := Story{Headline: "Rates cut", Stance: -0.2}
-	if a.fingerprint() == b.fingerprint() {
+	if a.Fingerprint() == b.Fingerprint() {
 		t.Fatal("framing the same headline differently reuses the same cache entry")
 	}
-	if a.fingerprint() == c.fingerprint() {
+	if a.Fingerprint() == c.Fingerprint() {
 		t.Fatal("a different headline reuses the same cache entry")
 	}
-	if a.fingerprint() != (Story{Headline: "Rates held", Stance: -0.2}).fingerprint() {
+	if a.Fingerprint() != (Story{Headline: "Rates held", Stance: -0.2}).Fingerprint() {
 		t.Fatal("the same story does not hit its own cache entry")
 	}
 }
@@ -115,5 +115,70 @@ func TestRepairLeavesInteriorQuotesAlone(t *testing.T) {
 	}
 	if !strings.Contains(got.Line, `"review"`) {
 		t.Fatalf("interior quotes lost: %q", got.Line)
+	}
+}
+
+// A long-running server sees a new story every few minutes, each adding ~450
+// entries. Unbounded, that is a leak that only shows up after a week.
+func TestCacheIsBoundedByStory(t *testing.T) {
+	r := New(nil, "m", "")
+	r.maxStory = 3
+
+	for s := 0; s < 6; s++ {
+		fp := Story{Headline: "story", Stance: float64(s)}.Fingerprint()
+		r.touchStory(fp)
+		r.mu.Lock()
+		for a := 0; a < 5; a++ {
+			r.cache[Key{Archetype: a, Story: fp}] = Reaction{Line: "x"}
+		}
+		r.mu.Unlock()
+	}
+	if got := r.Stories(); got != 3 {
+		t.Fatalf("cache holds %d stories, bound is 3", got)
+	}
+	// Evicted whole, never in part: a story with some archetypes present and
+	// some missing would give an aggregate over a biased subset.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	perStory := map[string]int{}
+	for k := range r.cache {
+		perStory[k.Story]++
+	}
+	if len(perStory) != 3 {
+		t.Fatalf("%d stories still have entries, want 3", len(perStory))
+	}
+	for s, n := range perStory {
+		if n != 5 {
+			t.Fatalf("story %q was evicted in part: %d of 5 entries left", s, n)
+		}
+	}
+	t.Logf("6 stories written, 3 retained, each complete at 5 entries")
+}
+
+// Re-running a story must not push it out of its own cache.
+func TestTouchingAStoryKeepsItResident(t *testing.T) {
+	r := New(nil, "m", "")
+	r.maxStory = 2
+	a := Story{Headline: "a"}.Fingerprint()
+	b := Story{Headline: "b"}.Fingerprint()
+	c := Story{Headline: "c"}.Fingerprint()
+
+	r.touchStory(a)
+	r.touchStory(b)
+	r.touchStory(a) // a is used again, so b should be the one evicted
+	r.touchStory(c)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	has := func(fp string) bool {
+		for _, s := range r.order {
+			if s == fp {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(a) || !has(c) || has(b) {
+		t.Fatalf("wrong eviction: order=%v", r.order)
 	}
 }

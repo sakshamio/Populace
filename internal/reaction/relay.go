@@ -70,7 +70,14 @@ type Relay struct {
 
 	mu    sync.RWMutex
 	cache map[Key]Reaction
-	path  string
+	// order is story fingerprints, oldest first. The cache is bounded by
+	// STORIES rather than entries because entries arrive in complete sets of
+	// ~450 and evicting half a story would leave a population where some
+	// archetypes have an opinion and some do not -- which is worse than having
+	// none, because the aggregate would silently be over a biased subset.
+	order    []string
+	maxStory int
+	path     string
 
 	// Counters are atomic so the progress endpoint never blocks behind a
 	// generation. A dashboard that stalls whenever the thing it is watching is
@@ -88,8 +95,14 @@ type Relay struct {
 	lastLine   atomic.Value // string
 }
 
+// MaxStories bounds the cache. A long-running server sees a new story every
+// few minutes; at 450 entries each, unbounded means a slow leak that only
+// shows up after a week.
+const MaxStories = 40
+
 func New(client *llm.Client, model, cachePath string) *Relay {
-	r := &Relay{client: client, model: model, cache: map[Key]Reaction{}, path: cachePath}
+	r := &Relay{client: client, model: model, cache: map[Key]Reaction{},
+		maxStory: MaxStories, path: cachePath}
 	r.story.Store("")
 	r.lastErr.Store("")
 	r.lastLine.Store("")
@@ -150,7 +163,9 @@ type Story struct {
 	Detail   string
 }
 
-func (s Story) fingerprint() string {
+// Fingerprint identifies the story in the cache. Exported because the persona
+// inspector needs to look up one archetype's reaction to the current story.
+func (s Story) Fingerprint() string {
 	return fmt.Sprintf("%s|%.2f|%s", s.Headline, s.Stance, s.Detail)
 }
 
@@ -211,7 +226,8 @@ func (r *Relay) Run(ctx context.Context, st Story, archetypes []int, conc int, o
 	if conc <= 0 {
 		conc = 6
 	}
-	fp := st.fingerprint()
+	fp := st.Fingerprint()
+	r.touchStory(fp)
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -372,9 +388,39 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// touchStory marks a story as most-recently-used and evicts whole stories past
+// the bound.
+func (r *Relay) touchStory(fp string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, s := range r.order {
+		if s == fp {
+			r.order = append(append(r.order[:i:i], r.order[i+1:]...), fp)
+			return
+		}
+	}
+	r.order = append(r.order, fp)
+	for len(r.order) > r.maxStory {
+		drop := r.order[0]
+		r.order = r.order[1:]
+		for k := range r.cache {
+			if k.Story == drop {
+				delete(r.cache, k)
+			}
+		}
+	}
+}
+
+// Stories reports how many distinct stories the cache holds, for the UI.
+func (r *Relay) Stories() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.order)
+}
+
 // Snapshot returns every cached reaction for a story, sorted by archetype.
 func (r *Relay) Snapshot(st Story) map[int]Reaction {
-	fp := st.fingerprint()
+	fp := st.Fingerprint()
 	out := map[int]Reaction{}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -412,10 +458,29 @@ func (r *Relay) load() {
 		return
 	}
 	r.mu.Lock()
+	seen := map[string]bool{}
 	for _, e := range entries {
 		r.cache[e.Key] = e.Reaction
+		if !seen[e.Key.Story] {
+			seen[e.Key.Story] = true
+			r.order = append(r.order, e.Key.Story)
+		}
 	}
 	r.mu.Unlock()
+
+	// A restored cache must be subject to the same bound as a live one, or a
+	// file that grew before the bound existed would stay over it forever.
+	for len(r.order) > r.maxStory {
+		r.mu.Lock()
+		drop := r.order[0]
+		r.order = r.order[1:]
+		for k := range r.cache {
+			if k.Story == drop {
+				delete(r.cache, k)
+			}
+		}
+		r.mu.Unlock()
+	}
 }
 
 func (r *Relay) save() {

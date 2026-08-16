@@ -1,0 +1,49 @@
+[Unit]
+Description=Populace simulation server
+Documentation=https://github.com/sakshamio/Populace
+After=network-online.target
+# Wants, not Requires: the simulation is designed to run with the model server
+# down -- ticks keep advancing and the UI reports degraded status -- so a model
+# server that is slow to come up must not stop the world from starting.
+Wants=qwen-sglang.service populace-gateway.service
+# Rate-limit restarts. These belong in [Unit]: systemd accepts them in
+# [Service] and silently ignores them, so the protection would have
+# existed only in this comment.
+#
+# The budget must span a long enough WALL CLOCK window to tell a transient
+# fault from a broken binary. The first version -- 6 failures in 300s at
+# RestartSec=5 -- was exhausted in thirty seconds by a port held briefly during
+# a redeploy, and systemd then refused to start the service at all. A service
+# that permanently disables itself over a transient conflict is the opposite of
+# self-healing. Ten attempts at 10s apart covers ~100s of flapping; anything
+# still failing after that is a real fault and should stop and be looked at.
+#
+# To clear it by hand after a genuine fault: systemctl --user reset-failed <unit>
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sakshamio/Populace
+ExecStart=/home/sakshamio/Populace/bin/populace \
+  -addr 127.0.0.1:8092 \
+  -n 1000000 \
+  -tick 400 \
+  -gateway http://127.0.0.1:8091 \
+  -reactions /home/sakshamio/Populace/reactions.json
+EnvironmentFile=-/home/sakshamio/.config/populace.env
+
+Restart=always
+RestartSec=10s
+
+
+# A 10M world is ~1.5 GB and takes seconds to rebuild, so give it room and give
+# it time to shut down cleanly rather than being killed mid-tick.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+StandardOutput=append:/home/sakshamio/populace.log
+StandardError=append:/home/sakshamio/populace.log
+
+[Install]
+WantedBy=default.target

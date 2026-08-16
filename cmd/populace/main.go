@@ -14,14 +14,17 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sakshamio/Populace/internal/experiment"
 	"github.com/sakshamio/Populace/internal/llm"
 	"github.com/sakshamio/Populace/internal/reaction"
 	"github.com/sakshamio/Populace/internal/sim"
@@ -45,7 +48,14 @@ type server struct {
 	gatewayURL string
 	relayConc  int
 	applyW     float64
+
+	exp *experiment.Runner
 }
+
+// startedAt is process start, reported so an operator can tell a server that
+// has been up for a week from one that restarted a minute ago -- which are
+// indistinguishable from any other number on the dashboard.
+var startedAt = time.Now()
 
 func main() {
 	var (
@@ -89,7 +99,8 @@ func main() {
 	log.Printf("heap %.2f GB for population and network", float64(ms.HeapAlloc)/1e9)
 
 	srv := &server{w: w, s: s, cfg: cfg, running: *run,
-		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW}
+		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW,
+		exp: experiment.NewRunner()}
 	if *gwURL != "" {
 		srv.relay = reaction.New(llm.New(*gwURL, *gwTok), *model, *rxCache)
 		log.Printf("model gateway %s (model %q, cache %s)", *gwURL, *model, *rxCache)
@@ -112,31 +123,17 @@ func main() {
 	mux.HandleFunc("/api/relay", srv.relayStatus)
 	mux.HandleFunc("/api/generate", srv.generate)
 	mux.HandleFunc("/api/reactions", srv.reactions)
+	mux.HandleFunc("/api/persona", srv.persona)
+	mux.HandleFunc("/api/experiment", srv.experimentStatus)
+	mux.HandleFunc("/api/experiment/run", srv.experimentRun)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(rw, "ok")
 	})
 
 	log.Printf("listening on %s (tick %dms, running=%v)", *addr, *tickMS, *run)
 	log.Fatal((&http.Server{
-		Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second,
+		Addr: *addr, Handler: recoverHTTP(mux), ReadHeaderTimeout: 10 * time.Second,
 	}).ListenAndServe())
-}
-
-// loop ticks on a fixed wall-clock interval and skips rather than queues if a
-// tick overruns. At ten million a tick is ~310 ms, so a 400 ms interval has
-// little headroom; catching up by running back-to-back ticks would turn a
-// momentary overrun into a permanently saturated CPU and a UI that never gets
-// a response.
-func (srv *server) loop(every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for range t.C {
-		srv.mu.Lock()
-		if srv.running {
-			srv.s.Advance()
-		}
-		srv.mu.Unlock()
-	}
 }
 
 func (srv *server) instances(maxSend int) http.HandlerFunc {
@@ -252,6 +249,8 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 		"archetypes":     world.NumArchetypes(),
 		"tick_ms":        tickMS,
 		"dirty":          dirty,
+		"uptime_s":       time.Since(startedAt).Seconds(),
+		"recovered":      recovered.Load(),
 		"wire": map[string]any{
 			"delta_bytes": 12 + 6*dirty,
 			"full_bytes":  12 + 2*n,
@@ -304,7 +303,8 @@ func (srv *server) relayStatus(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(rw, map[string]any{
-		"enabled": true, "gateway": srv.gatewayURL, "progress": srv.relay.Progress(),
+		"enabled": true, "gateway": srv.gatewayURL,
+		"progress": srv.relay.Progress(), "stories": srv.relay.Stories(),
 	})
 }
 
@@ -466,6 +466,171 @@ func (srv *server) generate(rw http.ResponseWriter, r *http.Request) {
 	}()
 
 	writeJSON(rw, map[string]any{"started": true, "archetypes": len(ids)})
+}
+
+// persona answers "who is that dot". The globe sends a point on the sphere and
+// gets back the nearest person to it, with everything the simulation knows.
+//
+// Nearest by great-circle distance over a linear scan, which is 10M distance
+// calculations and ~15 ms. A spatial index would make it microseconds and would
+// also be a second copy of the spatial ordering the graph already maintains --
+// not worth the divergence risk for a click a human makes once a second.
+func (srv *server) persona(rw http.ResponseWriter, r *http.Request) {
+	lon, err1 := strconv.ParseFloat(r.URL.Query().Get("lon"), 64)
+	lat, err2 := strconv.ParseFloat(r.URL.Query().Get("lat"), 64)
+	if err1 != nil || err2 != nil {
+		http.Error(rw, "lon and lat are required, in radians", http.StatusBadRequest)
+		return
+	}
+	tx, ty, tz := unit(lon, lat)
+
+	srv.mu.Lock()
+	best, bestDot := -1, -2.0
+	for i := 0; i < srv.w.N; i++ {
+		x, y, z := unit(float64(srv.w.Lon[i]), float64(srv.w.Lat[i]))
+		if d := x*tx + y*ty + z*tz; d > bestDot {
+			best, bestDot = i, d
+		}
+	}
+	if best < 0 {
+		srv.mu.Unlock()
+		http.Error(rw, "empty world", http.StatusNotFound)
+		return
+	}
+
+	a := world.Archetype(srv.w.Arch[best])
+	deg := srv.s.G.Degree(best)
+
+	// How many of this person's own neighbours have adopted. This is the number
+	// the threshold rule actually reads, so showing it makes an individual's
+	// behaviour explicable rather than mysterious.
+	adoptedNb := 0
+	for _, j := range srv.s.G.Neighbours(best) {
+		if srv.s.C.State[j] != sim.Unaware {
+			adoptedNb++
+		}
+	}
+	out := map[string]any{
+		"id": best, "place": srv.w.PlaceName(best),
+		"role": a.Role().Name, "region": world.Regions[a.Region()].Name,
+		"stratum":   world.Strata[a.Role().Stratum].Name,
+		"archetype": int(a), "describe": a.Describe(),
+		"weight":             srv.w.Weight[best],
+		"urbanity":           srv.w.Urbanity[best],
+		"ties":               deg,
+		"opinion":            srv.s.O.Y[best],
+		"prior":              srv.s.O.Prior[best],
+		"openness":           srv.s.O.Lambda[best],
+		"threshold":          srv.s.C.Threshold[best],
+		"state":              []string{"has not heard", "carrying it", "moved on"}[srv.s.C.State[best]],
+		"neighbours_adopted": adoptedNb,
+		"needs":              needsFor(srv.s, best, deg),
+	}
+	srv.mu.Unlock()
+
+	if srv.relay != nil {
+		if rx, ok := srv.relay.Get(reaction.Key{Archetype: int(a), Story: srv.storyFP()}); ok {
+			out["line"] = rx.Line
+			out["reaction_stance"] = rx.Stance
+			out["reaction_salience"] = rx.Salience
+		}
+	}
+	writeJSON(rw, out)
+}
+
+// needsFor is how many adopted neighbours this person requires before acting.
+func needsFor(s *sim.Sim, i, deg int) int {
+	scale := s.C.ThresholdScale
+	if scale <= 0 {
+		scale = 1
+	}
+	n := int(float64(s.C.Threshold[i])*scale*float64(deg) + 0.999)
+	if n < s.C.MinReinforce {
+		n = s.C.MinReinforce
+	}
+	return n
+}
+
+func (srv *server) storyFP() string {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.story.Fingerprint()
+}
+
+func unit(lon, lat float64) (x, y, z float64) {
+	cl := math.Cos(lat)
+	return cl * math.Sin(lon), math.Sin(lat), cl * math.Cos(lon)
+}
+
+func (srv *server) experimentStatus(rw http.ResponseWriter, r *http.Request) {
+	writeJSON(rw, map[string]any{
+		"progress": srv.exp.Progress(), "result": srv.exp.Last(),
+	})
+}
+
+// experimentRun launches a paired design in the background.
+//
+// Background because a 12-replicate design at 60k is tens of seconds and a
+// 50-replicate one is minutes -- an HTTP handler that blocks that long is one
+// that times out behind every proxy between here and the browser.
+func (srv *server) experimentRun(rw http.ResponseWriter, r *http.Request) {
+	var cfg experiment.Config
+	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1<<16)).Decode(&cfg); err != nil {
+		http.Error(rw, "bad experiment config", http.StatusBadRequest)
+		return
+	}
+	if len(cfg.Arms) == 0 {
+		http.Error(rw, "an experiment needs at least one arm", http.StatusBadRequest)
+		return
+	}
+	// Bounded so a stray request cannot pin every core for an hour.
+	if cfg.N > 200_000 {
+		cfg.N = 200_000
+	}
+	if cfg.Replicates > 60 {
+		cfg.Replicates = 60
+	}
+	if cfg.BaseSeed == 0 {
+		cfg.BaseSeed = uint64(time.Now().UnixNano())
+	}
+
+	// Attach cached model output to any arm that asked for it, by label.
+	// Resolved here rather than in package experiment so that the experiment
+	// runner never needs to know a gateway exists.
+	if srv.relay != nil {
+		snap := srv.relay.Snapshot(reaction.Story{Headline: srv.lastEv})
+		if len(snap) > 0 {
+			for i := range cfg.Arms {
+				if !strings.Contains(strings.ToLower(cfg.Arms[i].Label), "model") {
+					continue
+				}
+				m := map[int]sim.ArchetypeReaction{}
+				for id, rx := range snap {
+					m[id] = sim.ArchetypeReaction{
+						Stance: rx.Stance, Salience: rx.Salience, Share: rx.Share,
+					}
+				}
+				cfg.Arms[i].Reactions = m
+			}
+		}
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
+		res, err := srv.exp.Run(ctx, cfg)
+		if err != nil {
+			log.Printf("experiment: %v", err)
+			return
+		}
+		log.Printf("experiment done: %d runs in %.1fs", res.Runs, res.ElapsedS)
+		for _, c := range res.Comparisons {
+			log.Printf("  %q vs %q: %+.1fpp [%.1f, %.1f] significant=%v",
+				c.Label, c.Against, c.MeanDiff*100, c.Lo*100, c.Hi*100, c.Significant)
+		}
+	}()
+	writeJSON(rw, map[string]any{"started": true,
+		"runs": cfg.Replicates * len(cfg.Arms)})
 }
 
 func writeJSON(rw http.ResponseWriter, v any) {

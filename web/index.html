@@ -111,6 +111,34 @@
   }
   .note{font-size:10px;color:var(--muted);line-height:1.55;margin:9px 0 0}
 
+  input[type=text]{
+    width:100%;font-family:var(--mono);font-size:11.5px;background:var(--void);
+    color:var(--ink);border:1px solid var(--line);padding:7px 8px;
+  }
+  input[type=text]:focus-visible{outline:2px solid var(--accent);outline-offset:0}
+  .sliders{display:flex;flex-direction:column;gap:7px;margin-top:9px}
+  .sliders label{
+    display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;
+    font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+  }
+  .sliders b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:400}
+  .sliders input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--accent);height:16px}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:11px;margin-bottom:9px}
+  .kv dt{color:var(--muted);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+    align-self:center}
+  .kv dd{margin:0;font-variant-numeric:tabular-nums}
+
+  .armrow{display:grid;grid-template-columns:1fr 74px;gap:2px 8px;align-items:center;
+    padding:5px 0;border-bottom:1px solid var(--line2)}
+  .armrow .lab{font-size:10.5px;color:var(--ink)}
+  .armrow .ci{grid-column:1/-1;position:relative;height:12px;background:#0A0D13;
+    border:1px solid var(--line2)}
+  .armrow .ci i{position:absolute;top:2px;bottom:2px;background:var(--accent);opacity:.5}
+  .armrow .ci u{position:absolute;top:0;bottom:0;width:1.5px;background:var(--ink)}
+  .armrow .ci s{position:absolute;top:1px;bottom:1px;background:var(--line);opacity:.7}
+  .armrow .val{font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+
   @media (max-width:1000px){
     main{flex-direction:column}
     aside{width:auto;border-left:0;border-top:2px solid var(--line);max-height:46vh}
@@ -201,6 +229,61 @@
       <div id="p-quotes"><p class="note">Break a story, then ask the model.</p></div>
     </section>
 
+    <section class="panel" id="pane-persona" style="display:none">
+      <h2>Who you clicked <em id="q-place"></em></h2>
+      <div id="q-body"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Compose a story</h2>
+      <input id="c-head" type="text" placeholder="Headline&hellip;" aria-label="headline">
+      <div class="sliders">
+        <label>coverage <b id="c-stance-v">-0.60</b>
+          <input id="c-stance" type="range" min="-1" max="1" step="0.05" value="-0.6"></label>
+        <label>how costly to act on <b id="c-diff-v">1.20</b>
+          <input id="c-diff" type="range" min="0.3" max="3" step="0.1" value="1.2"></label>
+        <label>media pickup <b id="c-sal-v">0.70</b>
+          <input id="c-sal" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+        <label>seeded share <b id="c-seed-v">1.00%</b>
+          <input id="c-seed" type="range" min="0.1" max="4" step="0.1" value="1"></label>
+      </div>
+      <div class="controls" style="margin-top:9px">
+        <select id="c-mode" aria-label="where it starts">
+          <option value="region" selected>starts in a place</option>
+          <option value="network">starts in a network</option>
+          <option value="scattered">scattered worldwide</option>
+        </select>
+        <button id="c-run" type="button">Run it</button>
+      </div>
+      <p class="note">Coverage is where the reporting sits, not whether the news
+      is good for anyone &mdash; those come apart, and the model resolves it per
+      archetype once you ask it.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Experiment <em id="x-note"></em></h2>
+      <p class="note" style="margin:0 0 9px">Paired design: every arm runs on the
+      same worlds and the same graphs, so the difference between arms is not the
+      difference between worlds. One run of a cascade model is a sample from a
+      bimodal distribution, not a measurement.</p>
+      <div class="controls">
+        <select id="x-preset" aria-label="experiment">
+          <option value="difficulty">cheap vs costly to act on</option>
+          <option value="seeding">place vs network vs scattered</option>
+          <option value="dose">seeded share: 0.4 / 1 / 2%</option>
+          <option value="model">with vs without the model</option>
+        </select>
+        <select id="x-reps" aria-label="replicates">
+          <option value="8">8 worlds</option>
+          <option value="16" selected>16 worlds</option>
+          <option value="32">32 worlds</option>
+        </select>
+        <button id="x-run" type="button">Run</button>
+      </div>
+      <div class="track" style="margin-top:9px"><i id="x-track"></i></div>
+      <div id="x-out"></div>
+    </section>
+
     <section class="panel">
       <h2>By region</h2>
       <table id="t-region"><thead><tr>
@@ -233,6 +316,11 @@
         <div class="m"><span class="k">state frame</span><span class="v" id="e-form">—</span></div>
         <div class="m"><span class="k">on the wire</span><span class="v" id="e-wire">—</span></div>
         <div class="m"><span class="k">instances</span><span class="v" id="e-load">—</span></div>
+      </div>
+      <div class="grid" style="margin-top:9px">
+        <div class="m"><span class="k">uptime</span><span class="v" id="e-uptime">—</span></div>
+        <div class="m"><span class="k">panics survived</span><span class="v" id="e-panics">—</span></div>
+        <div class="m"><span class="k">stories cached</span><span class="v" id="e-stories">—</span></div>
       </div>
       <p class="note" id="e-wirenote"></p>
     </section>
@@ -351,6 +439,9 @@ async function pollStats() {
   $('e-tick').textContent = (d.tick_ms ?? 0).toFixed(1) + ' ms';
   $('e-form').textContent = d.wire.form;
   $('e-wire').textContent = bytes(d.wire.form === 'full' ? d.wire.full_bytes : d.wire.delta_bytes);
+  $('e-uptime').textContent = secs(d.uptime_s ?? 0);
+  $('e-panics').textContent = num(d.recovered ?? 0);
+  $('e-panics').className = 'v ' + ((d.recovered ?? 0) ? 'neg' : 'zero');
   $('e-wirenote').textContent =
     `${num(d.dirty)} personas changed since the last frame. A delta costs 6 bytes ` +
     `each (${bytes(d.wire.delta_bytes)}), a full resend 2 (${bytes(d.wire.full_bytes)}) — ` +
@@ -418,6 +509,7 @@ async function pollRelay() {
   $('p-elapsed').textContent = p.elapsed_s ? secs(p.elapsed_s) : '—';
   $('p-eta').textContent = p.running && p.eta_s ? secs(p.eta_s) : '—';
   $('p-track').style.width = p.total ? (p.done / p.total * 100).toFixed(1) + '%' : '0%';
+  $('e-stories').textContent = num(d.stories ?? 0);
   $('gen').disabled = p.running;
 
   const e = $('p-relayerr');
@@ -538,6 +630,164 @@ $('gen').addEventListener('click', async () => {
   pollRelay();
 });
 
+// --- persona inspector --------------------------------------------------
+// The panel exists to make one person's behaviour explicable rather than
+// mysterious: it shows how many of their neighbours have adopted and how many
+// they need, which is exactly the comparison the threshold rule performs.
+$('gl').addEventListener('click', async (ev) => {
+  if (!globe || !globe.n) return;
+  const hit = globe.pick(ev.clientX, ev.clientY);
+  if (!hit) { $('pane-persona').style.display = 'none'; return; }
+  const p = await getJSON(`/api/persona?lon=${hit.lon}&lat=${hit.lat}`);
+  if (!p) return;
+
+  $('pane-persona').style.display = '';
+  $('q-place').textContent = p.place;
+  const say = p.line
+    ? `<div class="quote"><p>${esc(p.line)}</p></div>` : '';
+  $('q-body').innerHTML = `
+    <p style="margin:0 0 9px;font-size:11.5px;line-height:1.5">${esc(p.describe)}</p>
+    <dl class="kv">
+      <dt>stratum</dt><dd>${esc(p.stratum)}</dd>
+      <dt>ties</dt><dd>${p.ties}</dd>
+      <dt>status</dt><dd>${esc(p.state)}</dd>
+      <dt>neighbours</dt>
+      <dd>${p.neighbours_adopted} of ${p.ties} have it &middot;
+          needs <b>${p.needs}</b> to act</dd>
+      <dt>sways with</dt>
+      <dd>${(p.susceptibility * 100).toFixed(0)}% neighbours,
+          ${((1 - p.susceptibility) * 100).toFixed(0)}% their own prior</dd>
+      <dt>opinion</dt>
+      <dd class="${cls(p.opinion)}">${p.opinion >= 0 ? '+' : ''}${p.opinion.toFixed(3)}
+          <span style="color:var(--muted)">(prior ${p.prior.toFixed(3)})</span></dd>
+      <dt>stands for</dt><dd>${num(Math.round(p.weight * 1000) / 1000)} people like them</dd>
+    </dl>${say}
+    <p class="note">What varies <em>within</em> an archetype &mdash; position, ties,
+    threshold, prior &mdash; is cheap deterministic Go. What varies <em>between</em>
+    archetypes is what the model was asked.</p>`;
+});
+
+// --- story composer -----------------------------------------------------
+for (const [id, fmt] of [['c-stance', v => (+v).toFixed(2)],
+                         ['c-diff', v => (+v).toFixed(2)],
+                         ['c-sal', v => (+v).toFixed(2)],
+                         ['c-seed', v => (+v).toFixed(2) + '%']]) {
+  const el = $(id);
+  const out = $(id + '-v');
+  el.addEventListener('input', () => { out.textContent = fmt(el.value); });
+}
+
+$('c-run').addEventListener('click', async () => {
+  const headline = $('c-head').value.trim() ||
+    'An unnamed story breaks without a headline';
+  const stance = +$('c-stance').value;
+  const difficulty = +$('c-diff').value;
+  const salience = +$('c-sal').value;
+  const seeding = $('c-mode').value;
+  const seed_size = Math.max(200, Math.round(globe.n * (+$('c-seed').value) / 100));
+  current = { headline, stance, difficulty };
+  $('hdr').textContent = headline + ' — breaking…';
+  try {
+    const r = await post('/api/event',
+      { headline, stance, salience, seeding, seed_size, difficulty });
+    $('hdr').textContent = `${headline} — breaking in ${r.where}`;
+    err.style.display = 'none';
+  } catch (e) { fail(e); }
+  refresh();
+});
+
+// --- experiments --------------------------------------------------------
+// The presets are the questions the engine can actually answer, phrased as the
+// comparison rather than as the parameter.
+const PRESETS = {
+  difficulty: () => [
+    { label: 'cheap to pass on', seed_frac: 0.01, difficulty: 0.6, seeding: 0 },
+    { label: 'ordinary', seed_frac: 0.01, difficulty: 1.4, seeding: 0 },
+    { label: 'costly to act on', seed_frac: 0.01, difficulty: 2.4, seeding: 0 },
+  ],
+  seeding: () => [
+    { label: 'starts in a place', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
+    { label: 'starts in a network', seed_frac: 0.01, difficulty: 1.2, seeding: 1 },
+    { label: 'scattered worldwide', seed_frac: 0.01, difficulty: 1.2, seeding: 2 },
+  ],
+  dose: () => [
+    { label: 'seeded 0.4%', seed_frac: 0.004, difficulty: 1.2, seeding: 0 },
+    { label: 'seeded 1%', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
+    { label: 'seeded 2%', seed_frac: 0.02, difficulty: 1.2, seeding: 0 },
+  ],
+  model: () => [
+    { label: 'engine only', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
+    { label: 'with model reactions', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
+  ],
+};
+
+$('x-run').addEventListener('click', async () => {
+  const arms = PRESETS[$('x-preset').value]().map(a => ({
+    ...a, salience: +$('c-sal').value, stance: +$('c-stance').value,
+  }));
+  $('x-out').innerHTML = '';
+  try {
+    await post('/api/experiment/run', {
+      n: 40000, replicates: +$('x-reps').value, rounds: 35, arms,
+    });
+    err.style.display = 'none';
+  } catch (e) { fail(e); }
+  pollExperiment();
+});
+
+async function pollExperiment() {
+  const d = await getJSON('/api/experiment');
+  if (!d) return;
+  const p = d.progress;
+  $('x-run').disabled = p.running;
+  $('x-track').style.width = p.total_runs ? (p.runs / p.total_runs * 100).toFixed(1) + '%' : '0%';
+  $('x-note').textContent = p.running
+    ? `${p.runs}/${p.total_runs} runs${p.eta_s ? ' · ' + secs(p.eta_s) + ' left' : ''}`
+    : (d.result ? `${d.result.runs} runs in ${d.result.elapsed_s.toFixed(1)}s` : '');
+
+  if (!d.result || p.running) return;
+  const res = d.result;
+
+  // One shared scale across arms, so the intervals are comparable by eye. A
+  // per-arm scale would make a 2pp effect and a 90pp effect look identical.
+  const hi = Math.max(...res.arms.map(a => a.reach.p90), 0.02);
+  const rows = res.arms.map(a => {
+    const w = (v) => (Math.max(0, Math.min(1, v / hi)) * 100).toFixed(1) + '%';
+    return `<div class="armrow">
+      <span class="lab">${esc(a.arm.label)}</span>
+      <span class="val">${pct(a.reach.mean, 1)}</span>
+      <span class="ci">
+        <s style="left:${w(a.reach.p10)};width:${w(a.reach.p90 - a.reach.p10)}"></s>
+        <i style="left:${w(a.reach.ci_lo)};width:${w(Math.max(a.reach.ci_hi - a.reach.ci_lo, hi * 0.004))}"></i>
+        <u style="left:${w(a.reach.mean)}"></u>
+      </span>
+    </div>`;
+  }).join('');
+
+  const cmp = res.comparisons.map(c => `
+    <div style="font-size:10.5px;margin-top:7px;line-height:1.5">
+      <b class="${c.significant ? cls(c.mean_diff) : 'zero'}">${pp(c.mean_diff)}pp</b>
+      <span style="color:var(--muted)">
+        ${esc(c.label)} vs ${esc(c.against)} &middot;
+        95% CI [${pp(c.ci_lo)}, ${pp(c.ci_hi)}] &middot;
+        ${c.significant ? 'interval excludes zero' : 'not distinguishable'}
+      </span>
+    </div>`).join('');
+
+  // The seed is the result. Two runs of the same design on different worlds
+  // gave 7.7% and 2.2% mean reach for one arm; without the seed neither is
+  // reproducible and the difference between them is unexplainable.
+  const seed = `<p class="note">Replay this exact design with
+    <code>base_seed ${res.config.base_seed}</code>, ${res.config.replicates} worlds
+    of ${num(res.config.n)}, ${res.config.rounds} rounds.</p>`;
+
+  $('x-out').innerHTML = rows + cmp + seed +
+    `<p class="note">Bar is the 95% interval on the mean; the fainter band is the
+     10th&ndash;90th percentile of individual worlds. Those answer different
+     questions: near a tipping point the mean is estimated tightly while the
+     outcomes span everything.</p>`;
+}
+
 function refresh() { pollStats(); pollBreakdown(); pollSeries(); pollQuotes(); }
 
 setInterval(pollState, 400);
@@ -546,11 +796,13 @@ setInterval(pollRelay, 1000);
 setInterval(pollSeries, 1500);
 setInterval(pollQuotes, 4000);
 setInterval(pollBreakdown, 3000);   // a full weighted scan of the population
+setInterval(pollExperiment, 1200);
 window.addEventListener('resize', pollSeries);
 
 load();
 refresh();
 pollRelay();
+pollExperiment();
 </script>
 </body>
 </html>

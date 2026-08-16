@@ -6,11 +6,14 @@ content and a Go engine doing the per-capita work.
 
 **Plan:** https://claude.ai/code/artifact/cb3b3c4a-f91b-4a80-b24c-f2afbf6f5a7c
 
-## Status — phase 5
+## Status — phase 6
 
 Grounded personas, a social network over them, opinion dynamics and contagion,
-a language model writing what each kind of person makes of the news, and an
-instrument panel that shows all of it while it runs.
+a language model writing what each kind of person makes of the news, a paired
+experiment runner for testing claims about any of it, and an instrument panel
+that shows all of it while it runs.
+
+Runs unattended under systemd `--user` units — see `deploy/install-units.sh`.
 
 ```
 go run ./cmd/populace -n 1000000
@@ -81,7 +84,9 @@ web/                WebGL2 renderer, one draw call
 - Phase 2: Go gateway on the Spark (auth, admission control at 8 in flight,
   priority lanes) and Tailscale from Railway.
 - LOD ladder down to palette-indexed pixel sprites.
-- Calibration. The mechanisms are tested; the magnitudes are not.
+- Calibration. The mechanisms are tested; the magnitudes are not. The
+  experiment runner is the machinery calibration would use.
+- Stratum share should vary by region (see phase 4).
 - Stratum share should vary by region. It currently does not: high-net-worth is
   3% of Lagos and 3% of Zurich, which understates real inequality. The mix
   *within* a stratum does shift correctly; the marginal does not.
@@ -463,3 +468,112 @@ The box rebooted during this phase. Everything came back except the model
 server, which has no unit — and notably `dsv4-api.service`, disabled earlier,
 stayed down and left its 77 GiB free, which is exactly what disabling it was
 for. SGLang takes ~500 s from `docker run` to serving.
+
+## Phase 6 — a result you can defend, an app you can play, a process that stays up
+
+### One run of a cascade model is not a measurement
+
+Threshold dynamics sit near a tipping point, and near a tipping point the same
+parameters give 1% reach in one world and 99% in the next. `internal/experiment`
+runs **paired designs**: every arm runs on the same worlds and the same graphs
+within a replicate, so the difference between arms is not contaminated by the
+difference between worlds.
+
+48 runs across 16 worlds, 2.7 s:
+
+| arm | mean reach | 95% CI | p10–p90 | tipped |
+|---|---|---|---|---|
+| starts in a place | 2.2% | [1.7, 2.9] | 1.4 – 2.4% | 0% |
+| starts in a network | 69.9% | [46.9, 87.6] | 3.8 – 99.1% | 69% |
+| scattered worldwide | 1.4% | [1.3, 1.4] | 1.3 – 1.5% | 0% |
+
+> network vs place **+67.7pp**, CI [+45.0, +90.7] — significant
+> scattered vs place **−0.8pp**, CI [−1.5, −0.3] — significant
+
+The interval and the spread answer different questions and are reported
+separately. Near a tipping point the mean is estimated tightly while individual
+worlds span everything, and collapsing those into one number is how a bimodal
+outcome gets reported as a measurement.
+
+**The seed is part of the result.** Two runs of the same design on different
+worlds gave 7.7% and 2.2% mean reach for one arm. `base_seed` is echoed in the
+output and shown in the UI, because without it neither number is reproducible
+and the gap between them is unexplainable.
+
+### The normal approximation was wrong here
+
+The first version reported mean ± 1.96 SE and produced, on real output, a 95%
+interval of **[−3.8%, +19.3%]** for a reach that cannot be negative. That is not
+a rounding artefact: reach is bounded in [0,1] and strongly bimodal, so nothing
+symmetric around the mean can describe its sampling distribution. It is now a
+percentile bootstrap, which makes no distributional assumption and cannot leave
+the support of the data, so every bound it reports is an outcome that could
+actually happen. `TestIntervalsStayInsideThePossible` pins it, and fails if the
+sample it uses stops breaking the normal approximation.
+
+### Playable
+
+- **Click any dot.** The inspector shows who that person is, where they live,
+  their ties, their prior, how much they sway with neighbours versus their own
+  view, **how many of their neighbours have adopted and how many they need** —
+  which is exactly the comparison the threshold rule performs, so an
+  individual's behaviour becomes explicable rather than mysterious. It inverts
+  the vertex shader exactly rather than approximating it; an approximate
+  unprojection returns someone a few degrees away, which reads as the app being
+  wrong about who lives where.
+- **Compose a story.** Headline, coverage stance, how costly it is to act on,
+  media pickup, seeded share, and where it starts.
+- **Run an experiment** from four presets, 8–32 worlds, with the intervals
+  drawn to a shared scale so arms are comparable by eye.
+
+### Staying up
+
+Three `--user` units, no root: `qwen-sglang`, `populace-gateway`, `populace`.
+Plus panic recovery in every HTTP handler and in the tick loop, because a 10M
+world costs seconds of CPU and 1.5 GB to rebuild and throwing it away over a
+malformed query is the wrong trade by a wide margin. Panics survived are
+counted and shown on the dashboard — a process quietly catching panics for a
+week looks healthy from outside, which is the situation that counter exists to
+prevent.
+
+Verified by killing things:
+
+```
+populace  321410 -> 321814  recovered
+gateway   322447 -> 322795  recovered
+          322795 -> 322975  recovered
+          322975 -> 323180  recovered
+simulation never stopped ticking
+```
+
+### Four things measurement caught
+
+**`StartLimitIntervalSec` in `[Service]` is silently ignored.** It belongs in
+`[Unit]`. The restart-loop protection existed only in the comment until
+`systemd-analyze verify` said so.
+
+**The first restart budget made the gateway *less* reliable.** Six failures in
+300 s at `RestartSec=5` was exhausted in thirty seconds by a port held briefly
+during a redeploy, and systemd then refused to start the service at all — a
+transient conflict permanently disabling a service is the opposite of
+self-healing. The budget now spans a wall-clock window long enough to tell a
+transient fault from a broken binary.
+
+**SGLang's `/health` lies.** It answers as soon as the HTTP server is up, which
+is minutes before the model can generate — weights still loading, CUDA graphs
+still capturing. Anything gating on it sends the first request into a
+connection reset. `/health_generate` actually runs the model, and the unit gates
+on that.
+
+**`Reset` did not restore thresholds the model had moved.** `ApplyReactions`
+lowers per-persona adoption thresholds; `Contagion.Reset` restored state and
+step but not thresholds, so the second story a server ever ran was measured on
+a population the first story had left behind. It would have contaminated every
+experiment arm and nothing in any aggregate would have looked wrong.
+
+### Bounded
+
+The reaction cache is bounded by **stories**, not entries, and evicted whole.
+Entries arrive in complete sets of ~450; evicting half a story would leave some
+archetypes with an opinion and some without, and the aggregate would silently
+be over a biased subset — worse than having none.
