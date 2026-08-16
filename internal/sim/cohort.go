@@ -24,8 +24,15 @@ import (
 // platform looks like from the inside: no algorithm, no amplification, just six
 // people who each bring news in from their own separate networks.
 type Cohort struct {
-	Origin     string   // the place they grew up
-	OriginID   uint16   // place index, for seeding stories where they live
+	Kind CohortKind
+
+	Origin   string // the place they grew up, or "" when the kind has none
+	OriginID uint16 // place index, for seeding stories where they live
+
+	// Platform is set only for KindOnline, where there is no shared place --
+	// the platform is the entire reason these six know each other.
+	Platform string
+
 	Friends    []Friend `json:"friends"`
 	Messages   []Message
 	maxHistory int
@@ -33,6 +40,119 @@ type Cohort struct {
 	// Last tick's values for these six only; see Observe.
 	prevState []uint8
 	prevY     []float32
+}
+
+// CohortKind is which rule picked these six people. The rule is the
+// experiment: each kind holds a different variable fixed (place, job,
+// platform) so a difference in how the story moves through the chat can be
+// attributed to something specific rather than to "six different people".
+type CohortKind uint8
+
+const (
+	// KindChildhood: four still live in one place, two moved to a different
+	// region. The default -- see newChildhoodCohort for why the split matters.
+	KindChildhood CohortKind = iota
+
+	// KindCoworkers: six people doing the same job in the same place. Nothing
+	// separates their media diet or their local ties, so a story that splits
+	// this group is telling you something about the story, not about them.
+	KindCoworkers
+
+	// KindOnline: six people who share a platform and nothing else -- drawn
+	// from six different regions on purpose. There is no local tie between
+	// them at all; if news reaches all six anywhere near together, the
+	// platform is the entire explanation.
+	KindOnline
+
+	// KindNeighbours: six people who all still live in one place, nobody
+	// moved. The control group for KindChildhood: same construction, minus
+	// the geographic split, so any difference between the two chats is the
+	// two movers and nothing else.
+	KindNeighbours
+
+	NumCohortKinds
+)
+
+// String is the wire form used by the API and the UI's <select>.
+func (k CohortKind) String() string {
+	switch k {
+	case KindCoworkers:
+		return "coworkers"
+	case KindOnline:
+		return "online"
+	case KindNeighbours:
+		return "neighbours"
+	default:
+		return "childhood"
+	}
+}
+
+// Label is what a person reads in the UI.
+func (k CohortKind) Label() string {
+	switch k {
+	case KindCoworkers:
+		return "Coworkers"
+	case KindOnline:
+		return "Online friends"
+	case KindNeighbours:
+		return "The neighbours"
+	default:
+		return "Childhood friends"
+	}
+}
+
+// ParseCohortKind maps the API's string back to a CohortKind. "" parses as
+// KindChildhood so an omitted field in a request body is not an error.
+func ParseCohortKind(s string) (CohortKind, bool) {
+	switch s {
+	case "coworkers":
+		return KindCoworkers, true
+	case "online":
+		return KindOnline, true
+	case "neighbours", "neighbors":
+		return KindNeighbours, true
+	case "childhood", "":
+		return KindChildhood, true
+	default:
+		return 0, false
+	}
+}
+
+// Sketch is a one-line, kind-specific explanation of why these six are
+// together, mirroring Platform.Sketch: the point is that a reader should be
+// able to argue with the mechanism, not just read a label.
+func (c *Cohort) Sketch() string {
+	switch c.Kind {
+	case KindCoworkers:
+		return "work the same job in " + c.Origin +
+			". Nothing separates their media diet -- a fast, homogeneous consensus is what to expect here."
+	case KindOnline:
+		return "never shared a hometown -- they know each other from " + c.Platform +
+			". Geography does nothing for this group; the platform is the whole channel."
+	case KindNeighbours:
+		return "all still live in " + c.Origin +
+			". No one moved, so there is no geographic split to explain a difference in when they hear things."
+	default:
+		return "grew up together in " + c.Origin + ". Four stayed, two moved away."
+	}
+}
+
+// Archetypes lists the distinct archetypes this cohort's six people belong to
+// -- rarely six, since a small cohort drawn from a shared place or job often
+// shares an archetype outright. Exported so a caller with a model gateway can
+// ask for exactly these, rather than the whole population, when a story
+// breaks and these six specifically need an answer soon.
+func (c *Cohort) Archetypes(w *world.World) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, f := range c.Friends {
+		a := int(world.Archetype(w.Arch[f.ID]))
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Friend is one member, bound to a real persona in the population. Everything
@@ -75,23 +195,186 @@ type Message struct {
 	Via     string  `json:"via,omitempty"` // platform, when the feed delivered it
 }
 
-// NewCohort picks six people who grew up in one place.
+// NewCohort picks six people according to kind. See CohortKind for what each
+// rule holds fixed and why that makes it a different experiment rather than a
+// different coat of paint.
+func NewCohort(w *world.World, g *Graph, m *Media, seed uint64, kind CohortKind) *Cohort {
+	switch kind {
+	case KindCoworkers:
+		return newCoworkersCohort(w, g, m, seed)
+	case KindOnline:
+		return newOnlineCohort(w, g, m, seed)
+	case KindNeighbours:
+		return newNeighboursCohort(w, g, m, seed)
+	default:
+		return newChildhoodCohort(w, g, m, seed)
+	}
+}
+
+// newChildhoodCohort picks six people who grew up in one place.
 //
 // Four still live there and two have moved away, which is not flavour: the two
 // who left sit in different regions with different platform mixes, so they hear
 // about things on a different schedule. A chat where everyone shares a media
 // environment would show one arrival time and teach nothing about how news
 // actually travels between places.
-func NewCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
+func newChildhoodCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
+	if w.N < 64 {
+		return nil
+	}
+	r := newRNG(seed, 0xC0405)
+	origin := pickPopulousPlace(w, &r)
+
+	locals := reservoirK(w, &r, 4, func(i int) bool {
+		return w.Place[i] == origin && world.Stratum(w.Strat[i]) != world.Media
+	})
+	_, originRegion, _, _ := world.PlaceInfo(int(origin))
+	movers := sampleDistinctRegions(w, &r, 2, 4000, originRegion, true, func(i int) bool {
+		return world.Stratum(w.Strat[i]) != world.Media
+	})
+	if len(locals) < 4 || len(movers) < 2 {
+		return nil
+	}
+
+	name, _, _, _ := world.PlaceInfo(int(origin))
+	c := &Cohort{Kind: KindChildhood, Origin: name, OriginID: origin, maxHistory: 400}
+	taken := map[string]bool{}
+	for _, id := range locals {
+		addFriend(c, w, g, m, id, false, taken)
+	}
+	for _, id := range movers {
+		addFriend(c, w, g, m, id, true, taken)
+	}
+	sort.Slice(c.Friends, func(i, j int) bool { return c.Friends[i].ID < c.Friends[j].ID })
+	return c
+}
+
+// newNeighboursCohort is newChildhoodCohort with the split removed: six people,
+// one place, nobody moved. The control group -- see CohortKind.
+func newNeighboursCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
+	if w.N < 64 {
+		return nil
+	}
+	r := newRNG(seed, 0xC0405)
+	origin := pickPopulousPlace(w, &r)
+	ids := reservoirK(w, &r, 6, func(i int) bool {
+		return w.Place[i] == origin && world.Stratum(w.Strat[i]) != world.Media
+	})
+	if len(ids) < 6 {
+		return nil
+	}
+	name, _, _, _ := world.PlaceInfo(int(origin))
+	c := &Cohort{Kind: KindNeighbours, Origin: name, OriginID: origin, maxHistory: 400}
+	taken := map[string]bool{}
+	for _, id := range ids {
+		addFriend(c, w, g, m, id, false, taken)
+	}
+	sort.Slice(c.Friends, func(i, j int) bool { return c.Friends[i].ID < c.Friends[j].ID })
+	return c
+}
+
+// newCoworkersCohort picks six people sharing one job in one place.
+func newCoworkersCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
 	if w.N < 64 {
 		return nil
 	}
 	r := newRNG(seed, 0xC0405)
 
-	// Pick an origin: a well-populated place, found by sampling rather than by
-	// scanning, because the population is sorted spatially and a scan would
-	// always land in the same continent.
-	var origin uint16
+	// Which (place, role) pair actually has a real team-sized population here,
+	// found the same way pickPopulousPlace finds a place: sample rather than
+	// scan, so the answer is a real cell in this world and not always the
+	// first one a scan would reach.
+	type cell struct {
+		place uint16
+		role  string
+	}
+	counts := map[cell]int{}
+	var best cell
+	bestN := -1
+	for k := 0; k < 1500; k++ {
+		i := int(r.u32()) % w.N
+		if world.Stratum(w.Strat[i]) == world.Media {
+			continue
+		}
+		c := cell{w.Place[i], world.Archetype(w.Arch[i]).Role().Name}
+		counts[c]++
+		if counts[c] > bestN {
+			bestN, best = counts[c], c
+		}
+	}
+	if bestN < 6 {
+		return nil
+	}
+
+	ids := reservoirK(w, &r, 6, func(i int) bool {
+		return w.Place[i] == best.place && world.Stratum(w.Strat[i]) != world.Media &&
+			world.Archetype(w.Arch[i]).Role().Name == best.role
+	})
+	if len(ids) < 6 {
+		return nil
+	}
+	pn, _, _, _ := world.PlaceInfo(int(best.place))
+	c := &Cohort{Kind: KindCoworkers, Origin: pn, OriginID: best.place, maxHistory: 400}
+	taken := map[string]bool{}
+	for _, id := range ids {
+		addFriend(c, w, g, m, id, false, taken)
+	}
+	sort.Slice(c.Friends, func(i, j int) bool { return c.Friends[i].ID < c.Friends[j].ID })
+	return c
+}
+
+// newOnlineCohort picks six people who share a platform and nothing else --
+// scattered one-per-region on purpose, so nothing but the platform can explain
+// a shared arrival time. Needs the media layer; returns nil without one.
+func newOnlineCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
+	if w.N < 64 || m == nil || len(m.Platforms) == 0 {
+		return nil
+	}
+	r := newRNG(seed, 0xC0405)
+
+	// Which platform has a genuinely broad userbase here, found by sampling
+	// membership rather than by picking platform 0 or the one with the
+	// largest configured Reach -- Reach is what a platform was built for, not
+	// necessarily what this particular world drew.
+	counts := make([]int, len(m.Platforms))
+	for k := 0; k < 1500; k++ {
+		mask := m.Member[int(r.u32())%w.N]
+		for p := range m.Platforms {
+			if mask&(1<<uint(p)) != 0 {
+				counts[p]++
+			}
+		}
+	}
+	plat := 0
+	for p, n := range counts {
+		if n > counts[plat] {
+			plat = p
+		}
+	}
+
+	ids := sampleDistinctRegions(w, &r, 6, 8000, 0, false, func(i int) bool {
+		return world.Stratum(w.Strat[i]) != world.Media && m.Member[i]&(1<<uint(plat)) != 0
+	})
+	if len(ids) < 6 {
+		return nil
+	}
+	c := &Cohort{Kind: KindOnline, Platform: m.Platforms[plat].Name, maxHistory: 400}
+	taken := map[string]bool{}
+	for _, id := range ids {
+		// Away has no "origin" to be away from here; it is unused for this
+		// kind and left false. The person card shows each one's own place
+		// regardless, which is the whole point -- six different places.
+		addFriend(c, w, g, m, id, false, taken)
+	}
+	sort.Slice(c.Friends, func(i, j int) bool { return c.Friends[i].ID < c.Friends[j].ID })
+	return c
+}
+
+// pickPopulousPlace finds a well-populated place by sampling rather than by
+// scanning, because the population is sorted spatially and a scan would
+// always land in the same continent.
+func pickPopulousPlace(w *world.World, r *rng) uint16 {
+	var best uint16
 	bestCount := -1
 	for try := 0; try < 24; try++ {
 		cand := w.Place[int(r.u32())%w.N]
@@ -102,92 +385,91 @@ func NewCohort(w *world.World, g *Graph, m *Media, seed uint64) *Cohort {
 			}
 		}
 		if n > bestCount {
-			bestCount, origin = n, cand
+			bestCount, best = n, cand
 		}
 	}
+	return best
+}
 
-	// Locals: four people who live in the origin place, drawn by reservoir
-	// sampling rather than by taking the first four matches.
-	//
-	// Taking the first four looked equivalent and was not. Roles are assigned
-	// partly from urbanity, and index order is not independent of it, so the
-	// first four matches in Mumbai came back as three smallholder farmers and a
-	// pastoral herder -- a real draw from a biased corner of the place rather
-	// than a representative one. The chat is supposed to be the readable check
-	// on the aggregates, which it cannot be if its own sample is skewed.
-	locals := make([]int32, 0, 4)
+// reservoirK draws up to k personas satisfying pred by reservoir sampling, so
+// the result is a genuine draw from everyone who matches rather than whoever
+// happens to sit at the lowest indices.
+//
+// Taking the first k looked equivalent to this once and was not. Roles are
+// assigned partly from urbanity, and index order is not independent of it, so
+// the first four matches in Mumbai came back as three smallholder farmers and
+// a pastoral herder -- a real draw from a biased corner of the place rather
+// than a representative one.
+func reservoirK(w *world.World, r *rng, k int, pred func(i int) bool) []int32 {
+	out := make([]int32, 0, k)
 	seen := 0
 	for i := 0; i < w.N; i++ {
-		if w.Place[i] != origin || world.Stratum(w.Strat[i]) == world.Media {
+		if !pred(i) {
 			continue
 		}
 		seen++
-		if len(locals) < 4 {
-			locals = append(locals, int32(i))
-		} else if k := int(r.u32()) % seen; k < 4 {
-			locals[k] = int32(i)
+		if len(out) < k {
+			out = append(out, int32(i))
+		} else if j := int(r.u32()) % seen; j < k {
+			out[j] = int32(i)
 		}
 	}
-	var movers []int32
-	// Movers: same generation, different region. Sampled at random across the
-	// world so the two who left are genuinely elsewhere.
-	_, originRegion, _, _ := world.PlaceInfo(int(origin))
-	for try := 0; try < 4000 && len(movers) < 2; try++ {
-		i := int32(r.u32()) % int32(w.N)
-		if i < 0 {
-			i = -i
-		}
-		if world.Stratum(w.Strat[i]) == world.Media {
+	return out
+}
+
+// sampleDistinctRegions draws up to k personas satisfying pred via bounded
+// random trials, at most one per region. When hasAvoid, avoidRegion is
+// additionally excluded from the start -- used by the childhood cohort so its
+// movers are not accidentally still in the locals' region.
+func sampleDistinctRegions(w *world.World, r *rng, k, tries int,
+	avoidRegion world.Region, hasAvoid bool, pred func(i int) bool) []int32 {
+	used := map[world.Region]bool{}
+	if hasAvoid {
+		used[avoidRegion] = true
+	}
+	out := make([]int32, 0, k)
+	for try := 0; try < tries && len(out) < k; try++ {
+		i := int(r.u32()) % w.N
+		if !pred(i) {
 			continue
 		}
-		if _, reg, _, _ := world.PlaceInfo(int(w.Place[i])); reg == originRegion {
+		_, reg, _, _ := world.PlaceInfo(int(w.Place[i]))
+		if used[reg] {
 			continue
 		}
-		movers = append(movers, i)
+		used[reg] = true
+		out = append(out, int32(i))
 	}
-	if len(locals) < 4 || len(movers) < 2 {
-		return nil
+	return out
+}
+
+// addFriend resolves one persona into a Friend and appends it, drawing a name
+// that is unique within this cohort.
+//
+// Names must be unique inside the chat. Drawing independently per persona
+// produced two people called Chen in the same six-person conversation, which
+// makes the transcript unreadable at exactly the moment it is supposed to be
+// the legible view.
+func addFriend(c *Cohort, w *world.World, g *Graph, m *Media, id int32, away bool, taken map[string]bool) {
+	a := world.Archetype(w.Arch[id])
+	pn, reg, _, _ := world.PlaceInfo(int(w.Place[id]))
+	f := Friend{
+		ID:     id,
+		Name:   uniqueName(reg, uint64(id), taken),
+		Role:   a.Role().Name,
+		Place:  pn,
+		Region: reg.String(),
+		Away:   away,
+		Degree: g.Degree(int(id)),
 	}
-
-	name, _, _, _ := world.PlaceInfo(int(origin))
-	c := &Cohort{Origin: name, OriginID: origin, maxHistory: 400}
-
-	// Names must be unique inside the chat. Drawing independently per persona
-	// produced two people called Chen in the same six-person conversation,
-	// which makes the transcript unreadable at exactly the moment it is
-	// supposed to be the legible view.
-	taken := map[string]bool{}
-	add := func(id int32, away bool) {
-		a := world.Archetype(w.Arch[id])
-		pn, reg, _, _ := world.PlaceInfo(int(w.Place[id]))
-		f := Friend{
-			ID:     id,
-			Name:   uniqueName(reg, uint64(id), taken),
-			Role:   a.Role().Name,
-			Place:  pn,
-			Region: reg.String(),
-			Away:   away,
-			Degree: g.Degree(int(id)),
-		}
-		if m != nil {
-			for p := range m.Platforms {
-				if m.Member[id]&(1<<uint(p)) != 0 {
-					f.Platforms = append(f.Platforms, m.Platforms[p].Name)
-				}
+	if m != nil {
+		for p := range m.Platforms {
+			if m.Member[id]&(1<<uint(p)) != 0 {
+				f.Platforms = append(f.Platforms, m.Platforms[p].Name)
 			}
 		}
-		c.Friends = append(c.Friends, f)
 	}
-	for _, id := range locals {
-		add(id, false)
-	}
-	for _, id := range movers {
-		add(id, true)
-	}
-
-	// Stable order, so the chat reads the same way twice.
-	sort.Slice(c.Friends, func(i, j int) bool { return c.Friends[i].ID < c.Friends[j].ID })
-	return c
+	c.Friends = append(c.Friends, f)
 }
 
 // Refresh reads live state back onto each friend.
@@ -214,6 +496,18 @@ func stateName(st uint8) string {
 	}
 }
 
+// ReactionSource optionally supplies a model-authored line for an archetype's
+// take on the current story, and whether one exists yet.
+//
+// Defined here rather than importing internal/reaction, for the same reason
+// ArchetypeReaction exists in reactions.go: package sim has to work identically
+// with no model configured, so it depends on a one-method shape it owns rather
+// than on the LLM package. A nil ReactionSource is exactly "no model" -- every
+// call site below treats it as the graceful-degradation case, not an error.
+type ReactionSource interface {
+	Reaction(archetype int) (line string, ok bool)
+}
+
 // Observe is called once per tick. It turns state transitions into chat.
 //
 // Every branch here is a transition, not a mood: somebody just adopted,
@@ -226,7 +520,7 @@ func stateName(st uint8) string {
 // snapshotting the population. Copying State and Y every tick to diff six
 // people would cost 50 MB of memory traffic per tick at ten million personas,
 // to answer a question about 0.00006% of them.
-func (c *Cohort) Observe(s *Sim) {
+func (c *Cohort) Observe(s *Sim, rs ReactionSource) {
 	if c == nil || len(c.Friends) == 0 {
 		return
 	}
@@ -253,7 +547,23 @@ func (c *Cohort) Observe(s *Sim) {
 			if s.M.Enabled() && s.C.FeedDriven != nil && s.C.FeedDriven[id] {
 				via = c.loudestPlatform(s.M, id)
 			}
-			c.say(s.Tick, f, arrivalLine(f, y, via), "heard", y, via)
+			// The model's line, when there is one, replaces the canned first
+			// reaction -- this is the one line per (archetype, story) the
+			// model was actually asked to write, in this person's own voice,
+			// about this specific headline. The canned line is not a worse
+			// version of this; it is what runs when there is no model, or the
+			// model has not answered for this archetype yet, which is why the
+			// fallback stays instead of a placeholder.
+			text, kind := "", "heard"
+			if rs != nil {
+				if line, ok := rs.Reaction(int(world.Archetype(s.W.Arch[id]))); ok {
+					text, kind = line, "heard-live"
+				}
+			}
+			if text == "" {
+				text = arrivalLine(f, y, via)
+			}
+			c.say(s.Tick, f, text, kind, y, via)
 
 		case was == Adopted && now == Fatigued:
 			// Only some people announce that they are done with a thing.
@@ -308,8 +618,10 @@ func (c *Cohort) Reset() {
 
 // The lines below are deterministic and state-driven. They are intentionally
 // plain: this is the fallback that always works, including with no model
-// gateway configured. When the relay is up, /api/cohort/generate replaces them
-// with model-authored dialogue for the same transitions.
+// gateway configured, and it is what a friend's "heard" message falls back to
+// when a ReactionSource is present but has not answered for their archetype
+// yet. See the "heard" case in Observe for where a model-authored line
+// replaces one of these instead.
 
 // pick chooses a variant by persona id, so a given friend keeps a consistent
 // voice across a run instead of drawing a fresh register every time they speak.

@@ -70,15 +70,31 @@ and final variance is identical to six decimal places.
 
 ## The group chat
 
-Six people who grew up in one place — four still there, two moved abroad — with
-a shared chat. Every line traces to a state transition: somebody adopted,
-somebody's opinion crossed zero, somebody was reached by a feed. Nothing is
-authored for mood.
+Six people with a shared chat, chosen by one of four rules -- see `CohortKind`
+in `internal/sim/cohort.go`. Every line traces to a state transition: somebody
+adopted, somebody's opinion crossed zero, somebody was reached by a feed.
+Nothing is authored for mood.
 
 It exists as an audit. Every number above it is an aggregate over a population,
 and an aggregate can look reasonable while the mechanism under it is wrong. If
 reach says 99% and nobody in the chat has heard, one of the two is lying and the
-chat is the one you can check by reading. A real transcript from a run:
+chat is the one you can check by reading.
+
+**The kind is the experiment.** Each one holds a different variable fixed, so a
+difference in how a story moves through the chat can be attributed to something
+specific rather than to "six different people":
+
+| kind | fixed | free | what it isolates |
+|---|---|---|---|
+| **Childhood friends** | four in one place, two moved elsewhere | job, platforms | geography's effect on arrival time |
+| **Coworkers** | same job, same place | nothing | the fast case -- homogeneous media diet, homogeneous consensus |
+| **Online friends** | one shared platform | everything else, one person per region | whether a platform alone can substitute for geography |
+| **The neighbours** | one place, nobody moved | job | the control for Childhood friends: same construction, minus the two movers |
+
+Switchable live from the chat view, which rerolls to a fresh draw of the chosen
+kind -- a different operation from an ordinary reset, which keeps the same six
+people and only clears the conversation. A transcript from a childhood-friends
+run:
 
 ```
 t19  Vikram   catching up on this now              (Lahore — moved away)
@@ -90,6 +106,26 @@ t28  Ling     ok I'm done with this topic
 
 The two who left hear first, because they sit in different media environments.
 That is the reason the cohort is not six people in one city.
+
+**First reactions are live when a model is configured.** Breaking a story
+eagerly warms the model's cache for just these six friends' archetypes --
+rarely six calls, since a cohort drawn from one place or one job usually shares
+an archetype outright -- so an answer is typically ready in single-digit
+seconds, well before contagion reaches them. A friend's first message then uses
+that answer verbatim, tagged `MODEL`, instead of the canned fallback:
+
+```
+Takeshi  MODEL   If the dockers walk out, my inbound components stop flowing
+                  and my 400 assembly lines go idle within 48 hours, so I'm
+                  already drafting the letter to the Ministry of Labor
+                  demanding immediate mediation.
+```
+
+This reuses the same cache "Ask the model" and the persona inspector read --
+one archetype, one story, one answer, seen everywhere it is relevant -- and it
+never blocks the tick loop: the warm-up runs in the background and a friend who
+hears before it lands simply gets the canned line, same as with no model
+configured at all. No model configured is exactly that fallback, forever.
 
 ## What is not here, and why
 

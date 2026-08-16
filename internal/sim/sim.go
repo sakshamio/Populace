@@ -26,6 +26,13 @@ type Sim struct {
 	// is the readable cross-check on every aggregate above it.
 	Chat *Cohort
 
+	// ReactionSource, when set, lets Chat's first-reaction messages use a
+	// model-authored line instead of the canned fallback. Left nil by New;
+	// the caller wires this in only if it has a model gateway, and package
+	// sim never imports the package that would define a concrete one -- see
+	// ReactionSource in cohort.go for why.
+	ReactionSource ReactionSource
+
 	Tick int
 
 	// dirty tracks which personas changed since the last snapshot.
@@ -66,6 +73,10 @@ type Config struct {
 	// the pre-media model and the control arm for every claim about them.
 	Platforms []Platform
 	MediaSeed uint64
+
+	// ChatKind picks which rule chooses the six people in Chat. Zero value is
+	// KindChildhood, so a caller that never sets this gets the original chat.
+	ChatKind CohortKind
 }
 
 func DefaultConfig() Config {
@@ -90,7 +101,7 @@ func New(w *world.World, cfg Config) *Sim {
 	if len(cfg.Platforms) > 0 {
 		s.M = NewMedia(w, cfg.Platforms, cfg.MediaSeed)
 	}
-	s.Chat = NewCohort(w, s.G, s.M, cfg.TopicSeed^0xC0FFEE)
+	s.Chat = NewCohort(w, s.G, s.M, cfg.TopicSeed^0xC0FFEE, cfg.ChatKind)
 	s.settle()
 	s.packAll()
 	return s
@@ -254,7 +265,7 @@ func (s *Sim) Advance() (newAdopters int, opinionDelta float64) {
 	newAdopters = s.C.AdvanceWith(s.G, shown)
 	opinionDelta = s.O.StepWith(s.G, s.M, s.W)
 	s.Tick++
-	s.Chat.Observe(s)
+	s.Chat.Observe(s, s.ReactionSource)
 	s.repack()
 
 	ms := float64(time.Since(t0).Microseconds()) / 1000
@@ -497,4 +508,23 @@ func (s *Sim) Reset(cfg Config) {
 	s.base = baseline{}
 	s.ResetHistory()
 	s.resync()
+}
+
+// RerollChat rebuilds Chat with a fresh draw of the given kind, and reports
+// whether the world could actually produce one -- KindOnline needs the media
+// layer, and every kind needs enough population matching its rule, neither of
+// which is guaranteed at small world sizes.
+//
+// The graph and population are untouched, and the current six are not carried
+// forward on purpose: a reroll is a request for a *different* chat, not a
+// nudge to the one already running. Same reasoning as why Reset keeps Chat's
+// people but clears its messages -- these are the two operations a user
+// actually wants, and neither is "keep everything, sort of".
+func (s *Sim) RerollChat(kind CohortKind, seed uint64) bool {
+	c := NewCohort(s.W, s.G, s.M, seed, kind)
+	if c == nil {
+		return false
+	}
+	s.Chat = c
+	return true
 }

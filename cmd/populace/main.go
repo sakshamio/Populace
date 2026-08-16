@@ -66,6 +66,31 @@ type server struct {
 // indistinguishable from any other number on the dashboard.
 var startedAt = time.Now()
 
+// reactionSource bridges the chat's decoupled sim.ReactionSource interface to
+// this server's model relay, so the group chat's first-reaction messages can
+// use a real model line when one is cached for a friend's archetype.
+//
+// It reads srv.relay and srv.story directly rather than through storyFP(),
+// which takes srv.mu -- and must not, here. Reaction is only ever called from
+// inside Sim.Advance(), which the tick loop always runs with srv.mu already
+// held (see tickOnce in resilience.go); a second Lock() from the same
+// goroutine would deadlock the tick loop permanently, with no panic and
+// nothing in the log, since sync.Mutex is not reentrant. If this type is ever
+// wired in anywhere Advance() runs without the lock held, this comment is
+// wrong and the read below is a race.
+type reactionSource struct{ srv *server }
+
+func (rs reactionSource) Reaction(archetype int) (string, bool) {
+	if rs.srv.relay == nil {
+		return "", false
+	}
+	rx, ok := rs.srv.relay.Get(reaction.Key{Archetype: archetype, Story: rs.srv.story.Fingerprint()})
+	if !ok {
+		return "", false
+	}
+	return rx.Line, true
+}
+
 func main() {
 	var (
 		addr = flag.String("addr", ":"+envOr("PORT", "8080"), "listen address")
@@ -114,6 +139,10 @@ func main() {
 	srv := &server{w: w, s: s, cfg: cfg, running: *run,
 		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW,
 		speed: 1, exp: experiment.NewRunner()}
+	// Wired unconditionally: reactionSource.Reaction checks srv.relay itself
+	// and returns false with no model configured, which is exactly the
+	// fallback-to-canned-lines behaviour the chat already had.
+	s.ReactionSource = reactionSource{srv}
 	if *gwURL != "" {
 		client := llm.New(*gwURL, *gwTok)
 		srv.relay = reaction.New(client, *model, *rxCache)
@@ -154,6 +183,7 @@ func main() {
 	mux.HandleFunc("/api/persona", srv.persona)
 	mux.HandleFunc("/api/media", srv.mediaStatus)
 	mux.HandleFunc("/api/chat", srv.chat)
+	mux.HandleFunc("/api/cohort", srv.cohort)
 	mux.HandleFunc("/api/experiment", srv.experimentStatus)
 	mux.HandleFunc("/api/experiment/run", srv.experimentRun)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
@@ -253,11 +283,51 @@ func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
 	}
 	srv.lastEv = req.Headline
 	srv.lastWhere = where
+	// Set immediately rather than waiting for /api/generate: this is the
+	// fingerprint reactionSource looks up under, and the chat's first
+	// messages can start arriving within a handful of ticks -- long before a
+	// person clicks "Ask the model", if they ever do.
+	story := reaction.Story{Headline: req.Headline, Stance: req.Stance}
+	srv.story = story
+	// Captured under the same lock that guards Chat.Friends, then used after
+	// unlocking -- the background generation below must not hold srv.mu for
+	// however long the model takes to answer.
+	var warmArchetypes []int
+	if srv.relay != nil && srv.s.Chat != nil {
+		warmArchetypes = srv.s.Chat.Archetypes(srv.w)
+	}
 	snap := srv.s.Snapshot(false)
 	srv.mu.Unlock()
 
 	log.Printf("event %q stance %+.2f salience %.2f: seeded %d in %s (%s)",
 		req.Headline, req.Stance, req.Salience, len(seeded), where, req.Seeding)
+
+	// Warm just the six friends' archetypes, not the population. This is what
+	// makes the chat's first reactions live by default rather than only after
+	// someone clicks "Ask the model": at most 6 archetypes (often fewer, since
+	// a small cohort sharing a place or a job usually shares one outright)
+	// against the ~450 a full run walks, so the wall-clock cost is seconds,
+	// not minutes, and it is well inside "the model authors content per
+	// archetype" -- this is that, just triggered by the story breaking instead
+	// of by a click. It only populates the cache; it deliberately does not
+	// call ApplyReactions, so breaking a story never moves anyone's opinion or
+	// threshold on its own -- that stays something only "Ask the model" does.
+	//
+	// relay.Run refuses a second concurrent call outright, so this can race a
+	// population-wide "Ask the model" run that is still in flight and simply
+	// fail -- logged, not surfaced to the client, exactly how the same
+	// collision already behaves in the generate handler below. Harmless: the
+	// full run's own pass covers these archetypes too by the time it finishes.
+	if len(warmArchetypes) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			err := srv.relay.Run(ctx, story, warmArchetypes, len(warmArchetypes), nil)
+			p := srv.relay.Progress()
+			log.Printf("chat reactions warmed: %d archetypes, %d from cache, %.1fs, err=%v",
+				len(warmArchetypes), p.FromCache, p.ElapsedS, err)
+		}()
+	}
 
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]any{
@@ -362,13 +432,54 @@ func (srv *server) chat(rw http.ResponseWriter, r *http.Request) {
 	// null, or every client has to special-case "no messages yet".
 	friends := append(make([]sim.Friend, 0, len(c.Friends)), c.Friends...)
 	msgs := append(make([]sim.Message, 0, len(c.Messages)), c.Messages...)
-	origin := c.Origin
+	origin, platform, sketch := c.Origin, c.Platform, c.Sketch()
+	kind, label := c.Kind.String(), c.Kind.Label()
 	srv.mu.Unlock()
 
 	writeJSON(rw, map[string]any{
-		"available": true, "origin": origin,
+		"available": true, "origin": origin, "platform": platform, "sketch": sketch,
+		"kind": kind, "kind_label": label,
 		"friends": friends, "messages": msgs,
 	})
+}
+
+// cohort rerolls the chat to a fresh draw, optionally of a different kind.
+// Distinct from /api/control{reset:true}: an ordinary reset keeps the same six
+// people and clears only the conversation, because a researcher comparing two
+// stories usually wants the same group for both. This endpoint is the other
+// operation -- "I want a different chat" -- and it is not something reset
+// should also quietly do.
+func (srv *server) cohort(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Kind string `json:"kind"`
+	}
+	json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1024)).Decode(&req)
+	kind, ok := sim.ParseCohortKind(req.Kind)
+	if !ok {
+		http.Error(rw, fmt.Sprintf("unknown cohort kind %q", req.Kind), http.StatusBadRequest)
+		return
+	}
+
+	srv.mu.Lock()
+	formed := srv.s.RerollChat(kind, uint64(time.Now().UnixNano()))
+	srv.mu.Unlock()
+
+	if !formed {
+		// Kind-specific enough to actually help: KindOnline is the one that
+		// needs something beyond population, and it is worth naming rather
+		// than leaving the reader to guess which constraint failed.
+		reason := "this world does not have enough people matching that pattern"
+		if kind == sim.KindOnline && srv.s.M == nil {
+			reason = "online friends needs the media layer, which is off in this run"
+		}
+		http.Error(rw, "could not form that chat: "+reason, http.StatusUnprocessableEntity)
+		return
+	}
+	writeJSON(rw, map[string]any{"ok": true, "kind": kind.String()})
 }
 
 func (srv *server) breakdown(rw http.ResponseWriter, r *http.Request) {
