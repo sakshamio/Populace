@@ -608,7 +608,7 @@ func (srv *server) persona(rw http.ResponseWriter, r *http.Request) {
 		"ties":               deg,
 		"opinion":            srv.s.O.Y[best],
 		"prior":              srv.s.O.Prior[best],
-		"openness":           srv.s.O.Lambda[best],
+		"susceptibility":     srv.s.O.Lambda[best],
 		"threshold":          srv.s.C.Threshold[best],
 		"state":              []string{"has not heard", "carrying it", "moved on"}[srv.s.C.State[best]],
 		"neighbours_adopted": adoptedNb,

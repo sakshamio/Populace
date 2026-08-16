@@ -66,29 +66,32 @@ void main(){
 // warm rim marks the ones the algorithm reached rather than their friends. A
 // population can be uniformly aware and completely split, and that is exactly
 // the state worth being able to see.
+// Colours match the CSS tokens exactly (--against, --favour, --feed) so a dot
+// on the globe and a chip in the sidebar read as the same fact rather than as
+// two designers' guesses at "roughly blue" and "roughly orange".
 const FS = `#version 300 es
 precision highp float;
 in float v_state, v_op, v_media, v_face, v_feed, v_fresh;
 out vec4 o;
 void main(){
   if (v_face <= 0.02) discard;         // backface cull: one dot product
-  vec3 against = vec3(0.298,0.451,0.855);
-  vec3 neutral = vec3(0.361,0.388,0.451);
-  vec3 favour  = vec3(0.898,0.541,0.243);
+  vec3 against = vec3(0.298,0.494,1.000);   // #4C7EFF
+  vec3 neutral = vec3(0.400,0.450,0.580);
+  vec3 favour  = vec3(1.000,0.604,0.239);   // #FF9A3D
   float t = clamp(abs(v_op) * 1.6, 0.0, 1.0);
   vec3 c = mix(neutral, v_op < 0.0 ? against : favour, t);
 
   // Unaware people stay dim; carriers burn; the fatigued keep the colour they
   // ended up with but stop drawing the eye.
-  float lum = 0.30;
-  if      (v_state > 1.5) lum = 0.62;  // fatigued: adopted, no longer spreading
-  else if (v_state > 0.5) lum = 1.35;  // actively transmitting
+  float lum = 0.34;
+  if      (v_state > 1.5) lum = 0.66;  // fatigued: adopted, no longer spreading
+  else if (v_state > 0.5) lum = 1.45;  // actively transmitting
   if (v_media > 0.5) lum *= 1.4;
 
   // Feed-driven adopters are tinted toward the algorithmic colour. Peer spread
   // and feed spread produce identical adoption states, so without this the one
   // thing the media layer demonstrates is invisible on the thing it changed.
-  if (v_feed > 0.5)  c = mix(c, vec3(0.78,0.35,0.72), 0.55);
+  if (v_feed > 0.5)  c = mix(c, vec3(0.761,0.310,0.820), 0.55);   // #C24FD1
   if (v_fresh > 0.5) lum *= 1.9;       // touched by a feed on this very tick
 
   o = vec4(c * lum * (0.42 + 0.58*v_face), 1.0);
@@ -117,8 +120,11 @@ void main(){
   if (d > 1.0 && u_morph < 0.5) discard;
   float z = sqrt(max(0.0, 1.0 - min(d*d, 1.0)));
   float lam = clamp(dot(normalize(vec3(v_p,z)), normalize(vec3(-0.35,0.25,0.9))), 0.0, 1.0);
-  vec3 globe = mix(vec3(0.055,0.07,0.10), vec3(0.10,0.13,0.19), lam);
-  vec3 plate = vec3(0.062,0.079,0.112);
+  // Deep indigo-teal jewel tones, matched to the CSS --deep/--deep2 tokens so
+  // the WebGL canvas and the light chrome around it read as one deliberate
+  // palette rather than a dark widget dropped into a bright page.
+  vec3 globe = mix(vec3(0.055,0.125,0.220), vec3(0.071,0.188,0.286), lam);
+  vec3 plate = vec3(0.059,0.145,0.251);
   o = vec4(mix(globe, plate, u_morph), 1.0);
 }`;
 
@@ -400,7 +406,7 @@ export class Globe {
         this.dirty = false;
       }
 
-      gl.clearColor(0.043, 0.055, 0.078, 1);
+      gl.clearColor(0.055, 0.125, 0.220, 1);   // matches --deep
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       gl.useProgram(this.pBody);
