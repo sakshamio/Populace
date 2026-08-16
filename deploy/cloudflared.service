@@ -1,0 +1,34 @@
+[Unit]
+Description=Cloudflare Tunnel (publishes the gateway at a stable public hostname)
+Documentation=https://github.com/sakshamio/Populace/blob/main/deploy/RAILWAY.md
+After=network-online.target populace-gateway.service
+# Wants, not Requires: if the gateway is briefly down the tunnel should stay up
+# and return 502 rather than tearing itself down too. A tunnel that dies with
+# its origin takes minutes of DNS/edge reconnection to come back, which turns a
+# ten-second gateway restart into a multi-minute outage.
+Wants=populace-gateway.service
+
+# Same restart budget as the other units, and in [Unit] for the same reason:
+# systemd accepts StartLimit* in [Service] and silently ignores it.
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# The tunnel credentials live in ~/.cloudflared/<uuid>.json, written by
+# `cloudflared tunnel create` and referenced from config.yml. They are NOT in
+# this repository -- this unit is committed to a public repo, and the tunnel
+# credential is a bearer credential for the tunnel itself.
+ExecStart=/home/sakshamio/.local/bin/cloudflared \
+  --no-autoupdate \
+  --config /home/sakshamio/.cloudflared/config.yml \
+  tunnel run
+
+Restart=always
+RestartSec=10s
+
+StandardOutput=append:/home/sakshamio/cloudflared.log
+StandardError=append:/home/sakshamio/cloudflared.log
+
+[Install]
+WantedBy=default.target

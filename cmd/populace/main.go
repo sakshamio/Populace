@@ -106,8 +106,23 @@ func main() {
 		gatewayURL: *gwURL, relayConc: *rxConc, applyW: *applyW,
 		exp: experiment.NewRunner()}
 	if *gwURL != "" {
-		srv.relay = reaction.New(llm.New(*gwURL, *gwTok), *model, *rxCache)
+		client := llm.New(*gwURL, *gwTok)
+		srv.relay = reaction.New(client, *model, *rxCache)
 		log.Printf("model gateway %s (model %q, cache %s)", *gwURL, *model, *rxCache)
+		// Probe once, in the background, and only log the result. The gateway
+		// being unreachable is not a reason to refuse to boot -- the simulation
+		// is the product and it runs without the model. But finding out at
+		// startup beats finding out when a user clicks Generate and waits.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := client.Check(ctx); err != nil {
+				log.Printf("model gateway unreachable at startup: %v", err)
+				log.Printf("the simulation runs; generation will fail until this clears")
+				return
+			}
+			log.Printf("model gateway reachable")
+		}()
 	} else {
 		log.Printf("no -gateway set: the simulation runs, but nobody has an opinion " +
 			"the model wrote")

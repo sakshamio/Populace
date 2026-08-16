@@ -1,12 +1,17 @@
 // Package llm talks to the gateway from the Railway side.
 //
-// The transport detail that matters: on Railway the app reaches the Spark over
-// Tailscale running in userspace mode, which means there is no TUN device and
-// no kernel route to 100.x addresses. Traffic has to go through tailscaled's
-// local SOCKS5 proxy instead. Go's http.Transport understands a socks5:// URL
-// from ALL_PROXY, so this needs no dependency and no custom dialer -- but it
-// does need the environment variable to be set, and a silent absence looks
-// exactly like the Spark being offline. Hence Client.Check.
+// The transport is deliberately boring: an ordinary HTTPS client with a bearer
+// token. It reaches the Spark at a public hostname published by a Cloudflare
+// Tunnel, so there is no private address to route to and nothing to set up on
+// this side.
+//
+// It did not start that way. The gateway used to live on a tailnet, which meant
+// a userspace tailscaled in the container (Railway has no TUN device), a SOCKS5
+// proxy, ALL_PROXY plumbing, and an auth key with an expiry -- and when any of
+// those lapsed, requests hung until they timed out, which is indistinguishable
+// from the Spark being down. ProxyFromEnvironment below is retained so a
+// same-tailnet deployment still works if anyone wants one, but it is no longer
+// load-bearing.
 package llm
 
 import (
@@ -16,9 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -175,21 +183,51 @@ func (c *Client) Health(ctx context.Context) (map[string]any, error) {
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
-// Check validates the environment before the first request, because the two
-// most likely misconfigurations both present as "the model is down".
+// Check validates the configuration before the first request, because most
+// ways of getting this wrong present identically as "the model is down".
+//
+// It is advisory. The caller should log a failure and carry on: the simulation
+// is the product and it runs fine with nobody generating opinions, so a
+// gateway that is briefly unreachable must not stop the server from booting.
 func (c *Client) Check(ctx context.Context) error {
 	if c.BaseURL == "" {
 		return errors.New("LLM_GATEWAY_URL is not set")
 	}
-	if os.Getenv("ALL_PROXY") == "" && os.Getenv("all_proxy") == "" {
-		// Not fatal: a same-host deployment needs no proxy. But on Railway
-		// this is the mistake, and it is worth naming rather than timing out.
-		return fmt.Errorf("ALL_PROXY is unset -- if the gateway is on a tailnet, "+
-			"userspace tailscaled has no kernel route and requests to %s will "+
-			"hang until they time out", c.BaseURL)
+	// A tailnet address with no proxy configured cannot work from a Railway
+	// container: there is no TUN device, so 100.x has no kernel route and the
+	// request hangs for the full timeout instead of failing. Name it now.
+	if looksLikeTailnet(c.BaseURL) &&
+		os.Getenv("ALL_PROXY") == "" && os.Getenv("all_proxy") == "" {
+		return fmt.Errorf("%s looks like a tailnet address and no ALL_PROXY is "+
+			"set -- without a TUN device there is no route and requests will "+
+			"hang until they time out. Publish the gateway at a public hostname "+
+			"(see deploy/setup-tunnel.sh)", c.BaseURL)
 	}
 	_, err := c.Health(ctx)
 	return err
+}
+
+// looksLikeTailnet reports whether the URL's host is one that resolves only
+// inside a tailnet: a 100.64.0.0/10 CGNAT address, or a bare MagicDNS name.
+//
+// Deliberately narrower than "is this a private address". Loopback and RFC1918
+// are ordinary for a same-host or same-LAN deployment and must not warn, and
+// they fail fast anyway if wrong. The tailnet case is singled out because it is
+// the one that hangs for ten minutes rather than refusing the connection --
+// silence there costs an afternoon, so it is worth naming up front.
+func looksLikeTailnet(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if ip := net.ParseIP(h); ip != nil {
+		v4 := ip.To4()
+		return v4 != nil && v4[0] == 100 && v4[1]&0xC0 == 64
+	}
+	// A name with no dots resolves only through MagicDNS or /etc/hosts.
+	// "localhost" is the one everybody has, and it is not a tailnet.
+	return h != "" && h != "localhost" && !strings.Contains(h, ".")
 }
 
 func truncate(s string, n int) string {

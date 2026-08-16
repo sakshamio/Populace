@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Install the three user units. No root anywhere: these are --user units and
+# Install the user units. No root anywhere: these are --user units and
 # lingering is what makes them survive logout and start at boot.
+#
+# The Cloudflare Tunnel is NOT installed here -- it needs a domain, so it has
+# its own one-time script: deploy/setup-tunnel.sh <domain>. Without it the
+# gateway is running and healthy and has no public hostname, which presents on
+# Railway as "the model is down".
 set -euo pipefail
 
 REPO=/home/sakshamio/Populace
