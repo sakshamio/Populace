@@ -50,6 +50,13 @@ type Arm struct {
 	Salience   float64     `json:"salience"`
 	Stance     float64     `json:"stance"`
 
+	// Hour sets the simulated UTC clock the moment this arm's story breaks --
+	// "the same story, but at 3am" as an arm rather than a manual one-off.
+	// Only meaningful when Config.DayNight is set; ignored otherwise, same as
+	// sim.Event.HasHour.
+	HasHour bool    `json:"has_hour"`
+	Hour    float64 `json:"hour"`
+
 	// Reactions applies cached model output. Nil is the no-model counterfactual,
 	// which is the baseline any claim about the model's contribution needs.
 	Reactions map[int]sim.ArchetypeReaction `json:"-"`
@@ -61,6 +68,12 @@ type Config struct {
 	Rounds     int    `json:"rounds"`     // simulation ticks per run
 	BaseSeed   uint64 `json:"base_seed"`
 	Arms       []Arm  `json:"arms"`
+
+	// DayNight turns on the diurnal activity rhythm for every arm in this
+	// experiment. Off by default, like sim.DefaultConfig itself -- an
+	// experiment that never mentions timing should not have its numbers
+	// quietly depend on what hour the arms happened to run.
+	DayNight bool `json:"daynight"`
 }
 
 // Stats is a sample summary with a 95% confidence interval on the MEAN.
@@ -205,6 +218,9 @@ func (r *Runner) Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	simCfg := sim.DefaultConfig()
+	if cfg.DayNight {
+		simCfg.DayNight = sim.DefaultDayNightConfig()
+	}
 	for rep := 0; rep < cfg.Replicates; rep++ {
 		if ctx.Err() != nil {
 			break
@@ -243,6 +259,7 @@ func (r *Runner) Run(ctx context.Context, cfg Config) (*Result, error) {
 				// world, and with nothing else so the arms stay paired.
 				Seed:       cfg.BaseSeed + uint64(rep)*0x9E3779B9,
 				Difficulty: arm.Difficulty,
+				HasHour:    arm.HasHour, Hour: arm.Hour,
 			})
 			if arm.Reactions != nil {
 				s.ApplyReactions(arm.Reactions, 1)

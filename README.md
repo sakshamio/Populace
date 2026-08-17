@@ -215,6 +215,73 @@ more nearby, not shown"), and ties that genuinely leave the neighbourhood --
 matching `graph.go`'s own finding that only ~55% of anyone's edges are
 geographic in the first place. See `internal/sim/street.go`.
 
+## A day in this world
+
+Every tick has always been "some unit of time" without a real one attached.
+`DayNightConfig` (`internal/sim/daynight.go`) gives it one: a simulated
+clock, `MinutesPerTick` real minutes per tick, and a diurnal activity curve
+derived from each persona's own longitude the way a real timezone is --
+`localHour(hourUTC, lonRad)` is 15 degrees to the hour, same as the planet.
+On by default in the server (`-daynight`, 10 simulated minutes per tick, so a
+full day cycles in under a minute at 1x), off by default in `Config` itself
+so every existing test and every other caller of `DefaultConfig` keeps the
+old always-awake behaviour unchanged.
+
+The mechanism is a single gate in `Contagion.AdvanceWith`: an unaware person
+whose local clock reads deep night has a low but never-zero chance of
+evaluating their exposure this tick, peer or feed, identical rule either way.
+Nothing about *what* a neighbour's adoption means changes -- an adopted
+neighbour is still visible at 3am the way a friend's post from yesterday is
+still sitting in a feed whenever it gets opened. What changes is whether
+*this* tick is the one where a given person actually checks.
+
+`Event.HasHour`/`Hour` (wired to `/api/event`'s `hour` field and the
+composer's "break it at a set time" control) let a story name the moment it
+breaks rather than whatever the clock already reads -- "the same story, but
+at 3am" as a request, not a coincidence of when you happened to click Run.
+The same field exists on an experiment `Arm`, so the paired-replicate
+machinery answers the quantitative version: the "what time it breaks" preset
+runs the identical story at deep night, morning, and evening across the same
+worlds, and on a real run the difference is significant and in the expected
+direction -- breaking into a region's own night measurably slows the early
+cascade, and recovers once other timezones wake into it. See
+`internal/sim/daynight_test.go` and
+`TestHourOfBreakingSeparatesArmsWhenDayNightIsOn` in
+`internal/experiment/experiment_test.go`.
+
+## Real country borders
+
+The globe now draws actual coastlines, not just population density --
+Natural Earth's public-domain 110m admin-0 boundaries (via the `world-atlas`
+TopoJSON distribution), decoded offline once (`scratchpad/borders/decode.js`,
+not part of the running app) into a flat binary of lon/lat rings
+(`web/borders.bin`, ~82KB) and rendered as one indexed `LINE_STRIP` draw call
+in `web/globe.js`, using WebGL2's fixed primitive-restart index to separate
+rings without a draw call each.
+
+The genuinely hard part was not fetching or decoding the data -- it was
+rendering it under continuous, unbounded rotation. The population points
+already wrap longitude per-vertex with `mod(lon+rot+PI, 2PI)-PI`, which is
+invisible for an independent point but not for a line: whenever that wrap
+sends one endpoint of a segment near +180 degrees and its neighbour near
+-180, the two are numerically far apart despite being adjacent on the globe,
+and the rasterizer draws the "short way" as a spurious line clear across the
+screen. This is not particular to rings that cross the real antimeridian --
+since rotation is unbounded, *every* ring's own wrap point eventually sweeps
+past each of its edges in turn. A per-fragment derivative test looked like
+the fix and measurably was not: a wrapped segment's *per-fragment* derivative
+is small even though the segment end-to-end spans the whole screen, confirmed
+by rendering it and watching the streaks survive. The actual fix compares a
+segment's two endpoints, which one vertex-shader invocation never sees on its
+own -- solved by giving every vertex in a ring a second attribute, `a_anchor`,
+that ring's own first raw longitude, and computing each vertex's position as
+the anchor's wrapped position plus its own rotation-invariant shortest-path
+offset from that anchor. Two vertices anchored to the same reference can
+never land on opposite sides of the branch cut from each other, and no real
+country's longitude span (even Russia's, the extreme case) exceeds what one
+shortest-path offset can represent. See the comment on `BORDER_VS` in
+`web/globe.js`.
+
 ## What is not here, and why
 
 **Step back.** Rewinding needs a stored copy of every persona per tick: 20 MB a
@@ -229,7 +296,9 @@ open http://localhost:8080
 ```
 
 Flags: `-n` personas, `-seed` world seed, `-tick` ms between ticks, `-run`
-start ticking immediately, `-addr`, `-web`.
+start ticking immediately, `-addr`, `-web`, `-daynight` (default on; the
+diurnal activity rhythm), `-daynight-minutes` simulated minutes per tick,
+`-daynight-start` UTC hour the clock reads at tick 0.
 
 With a model gateway (see phase 2), add:
 

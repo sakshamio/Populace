@@ -115,6 +115,10 @@ func main() {
 		tickMS  = flag.Int("tick", envInt("POPULACE_TICK_MS", 400), "milliseconds between simulation ticks")
 		run     = flag.Bool("run", true, "start ticking immediately")
 
+		daynight      = flag.Bool("daynight", true, "gate contagion by a diurnal activity rhythm")
+		daynightMin   = flag.Float64("daynight-minutes", 10, "simulated minutes per tick, for the day/night clock")
+		daynightHour0 = flag.Float64("daynight-start", 9, "UTC hour the day/night clock reads at tick 0")
+
 		gwURL   = flag.String("gateway", envOr("LLM_GATEWAY_URL", ""), "model gateway base URL; empty disables generation")
 		gwTok   = flag.String("token", os.Getenv("LLM_TOKEN"), "bearer token for the gateway")
 		model   = flag.String("model", envOr("LLM_MODEL", "default"), "model name to request")
@@ -136,6 +140,11 @@ func main() {
 	}
 
 	cfg := sim.DefaultConfig()
+	if *daynight {
+		cfg.DayNight = sim.DefaultDayNightConfig()
+		cfg.DayNight.MinutesPerTick = *daynightMin
+		cfg.DayNight.StartHourUTC = *daynightHour0
+	}
 	t0 = time.Now()
 	s := sim.New(w, cfg)
 	log.Printf("social graph in %s — %s edges, mean degree %.1f",
@@ -259,6 +268,12 @@ type eventReq struct {
 	SeedSize   int     `json:"seed_size"`
 	Seed       uint64  `json:"seed"`
 	Difficulty float64 `json:"difficulty"` // <1 cheap to act on, >1 costly
+
+	// Hour sets the simulated UTC clock at the moment this story breaks --
+	// "introduce the news at 3am" rather than whatever the clock already
+	// reads. A pointer so "not sent" (leave the clock alone) is
+	// distinguishable from "midnight". Ignored when day/night is off.
+	Hour *float64 `json:"hour"`
 }
 
 func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
@@ -286,6 +301,7 @@ func (srv *server) event(rw http.ResponseWriter, r *http.Request) {
 		Headline: req.Headline, Stance: float32(clamp1(req.Stance)),
 		Salience: req.Salience, Seeding: seedingOf(req.Seeding),
 		SeedSize: req.SeedSize, Seed: req.Seed, Difficulty: req.Difficulty,
+		HasHour: req.Hour != nil, Hour: derefHour(req.Hour),
 	})
 	// Where it broke, taken from the seed set rather than chosen separately --
 	// two sources for the same fact is two chances to disagree about it.
@@ -400,6 +416,8 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 	snap := srv.s.Snapshot(r.URL.Query().Get("degree") == "1")
 	running, last, where := srv.running, srv.lastEv, srv.lastWhere
 	tickMS, dirty, n := srv.s.TickMS, srv.s.DirtyCount(), srv.w.N
+	dayNightOn := srv.s.DayNight.MinutesPerTick > 0
+	hourUTC := srv.s.HourUTC
 	srv.mu.Unlock()
 
 	rw.Header().Set("Content-Type", "application/json")
@@ -412,6 +430,8 @@ func (srv *server) stats(rw http.ResponseWriter, r *http.Request) {
 		"dirty":          dirty,
 		"uptime_s":       time.Since(startedAt).Seconds(),
 		"recovered":      recovered.Load(),
+		"daynight":       dayNightOn,
+		"hour_utc":       hourUTC,
 		"wire": map[string]any{
 			"delta_bytes": 12 + 6*dirty,
 			"full_bytes":  12 + 2*n,
@@ -996,6 +1016,15 @@ func seedingOf(s string) sim.Seeding {
 	default:
 		return sim.SeedInRegion
 	}
+}
+
+// derefHour is 0 for "no hour sent" (HasHour will be false alongside it, so
+// the zero is never read as a real value) and the requested hour otherwise.
+func derefHour(h *float64) float64 {
+	if h == nil {
+		return 0
+	}
+	return *h
 }
 
 func clamp1(v float64) float64 {

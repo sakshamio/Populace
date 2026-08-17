@@ -35,6 +35,12 @@ type Sim struct {
 
 	Tick int
 
+	// DayNight is fixed for the run, set once by New from Config and never
+	// touched by Reset -- same reasoning as G not being rebuilt by Reset.
+	// HourUTC is the live clock; see daynight.go.
+	DayNight DayNightConfig
+	HourUTC  float64
+
 	// dirty tracks which personas changed since the last snapshot.
 	//
 	// A delta is not automatically cheaper, and measuring it was a surprise: a
@@ -77,6 +83,14 @@ type Config struct {
 	// ChatKind picks which rule chooses the six people in Chat. Zero value is
 	// KindChildhood, so a caller that never sets this gets the original chat.
 	ChatKind CohortKind
+
+	// DayNight is the diurnal activity rhythm; MinutesPerTick == 0 (the zero
+	// value, and DefaultConfig's own value) disables it entirely, which is
+	// deliberate -- every existing test and every other caller of
+	// DefaultConfig gets the old always-awake behaviour unchanged. The
+	// server opts in explicitly with DefaultDayNightConfig(); see
+	// daynight.go and cmd/populace/main.go.
+	DayNight DayNightConfig
 }
 
 func DefaultConfig() Config {
@@ -91,12 +105,14 @@ func DefaultConfig() Config {
 
 func New(w *world.World, cfg Config) *Sim {
 	s := &Sim{
-		W:       w,
-		G:       BuildGraph(w, cfg.Graph),
-		O:       NewOpinion(w, cfg.TopicSeed),
-		C:       NewContagion(w, cfg.Contagion),
-		inDirty: make([]bool, w.N),
-		lastFl:  make([]uint16, w.N),
+		W:        w,
+		G:        BuildGraph(w, cfg.Graph),
+		O:        NewOpinion(w, cfg.TopicSeed),
+		C:        NewContagion(w, cfg.Contagion),
+		inDirty:  make([]bool, w.N),
+		lastFl:   make([]uint16, w.N),
+		DayNight: cfg.DayNight,
+		HourUTC:  cfg.DayNight.StartHourUTC,
 	}
 	if len(cfg.Platforms) > 0 {
 		s.M = NewMedia(w, cfg.Platforms, cfg.MediaSeed)
@@ -150,6 +166,14 @@ type Event struct {
 	// them something to act on. 1 leaves the population's own thresholds
 	// untouched.
 	Difficulty float64
+
+	// HasHour and Hour let a caller set what time it is, in UTC, at the
+	// moment this story breaks -- "introduce the news at 3am" rather than
+	// whatever the clock already reads. Ignored when DayNight is disabled.
+	// A nil-equivalent (HasHour false) leaves the clock exactly where it
+	// was, which is what every event that does not care about timing wants.
+	HasHour bool
+	Hour    float64
 }
 
 // Seeding is where a story starts.
@@ -174,6 +198,10 @@ const (
 
 // Inject applies an event and returns the seeded adopters.
 func (s *Sim) Inject(ev Event) []int32 {
+	if ev.HasHour && s.DayNight.enabled() {
+		s.HourUTC = wrapHour(ev.Hour)
+	}
+
 	// Broadcasters first: the story exists because they carried it.
 	var carriers []int32
 	r := newRNG(ev.Seed^0xE7E7, 0)
@@ -272,9 +300,16 @@ func (s *Sim) Advance() (newAdopters int, opinionDelta float64) {
 	if s.M.Enabled() {
 		shown = s.M.Advance(s.W, s.C, s.O)
 	}
-	newAdopters = s.C.AdvanceWith(s.G, shown)
+	var activity []float64
+	if s.DayNight.enabled() {
+		activity = s.dayNightActivity()
+	}
+	newAdopters = s.C.AdvanceWith(s.G, shown, activity)
 	opinionDelta = s.O.StepWith(s.G, s.M, s.W)
 	s.Tick++
+	if s.DayNight.enabled() {
+		s.HourUTC = wrapHour(s.HourUTC + s.DayNight.MinutesPerTick/60)
+	}
 	s.Chat.Observe(s, s.ReactionSource)
 	s.repack()
 
@@ -514,6 +549,7 @@ func (s *Sim) Reset(cfg Config) {
 	s.O = NewOpinion(s.W, cfg.TopicSeed)
 	s.settle()
 	s.Tick = 0
+	s.HourUTC = s.DayNight.StartHourUTC
 	s.baseOpinion, s.baseNeg, s.basePos = 0, 0, 0
 	s.base = baseline{}
 	s.ResetHistory()

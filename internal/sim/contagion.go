@@ -154,11 +154,15 @@ func NewContagion(w *world.World, cfg ContagionConfig) *Contagion {
 
 // Advance runs one round over peer ties alone and reports how many newly
 // adopted. This is the pre-media model and remains the definition of it.
-func (c *Contagion) Advance(g *Graph) int { return c.AdvanceWith(g, nil) }
+func (c *Contagion) Advance(g *Graph) int { return c.AdvanceWith(g, nil, nil) }
 
 // AdvanceWith runs one round, optionally counting confirmations the media layer
-// delivered. shown[i] is how many apparent adopters person i's feeds put in
-// front of them this tick; nil means peer ties only.
+// delivered and gating evaluation by a day/night activity curve. shown[i] is
+// how many apparent adopters person i's feeds put in front of them this
+// tick; nil means peer ties only. activity[i] is this tick's [0,1] chance
+// person i is actually paying attention (see daynight.go); nil means always
+// -- exactly the old behaviour, and every existing caller that passes nil
+// here gets it unchanged.
 //
 // Feed confirmations are added to peer confirmations rather than evaluated
 // against a separate rule, and that is the modelling claim: a threshold is
@@ -172,7 +176,7 @@ func (c *Contagion) Advance(g *Graph) int { return c.AdvanceWith(g, nil) }
 // adopts this round must not transmit until the next one. Updating in place
 // would let a cascade travel an unbounded distance in a single tick, at a
 // speed set by memory layout.
-func (c *Contagion) AdvanceWith(g *Graph, shown []uint8) int {
+func (c *Contagion) AdvanceWith(g *Graph, shown []uint8, activity []float64) int {
 	scale := c.ThresholdScale
 	if scale <= 0 {
 		scale = 1
@@ -188,6 +192,18 @@ func (c *Contagion) AdvanceWith(g *Graph, shown []uint8) int {
 		for i := lo; i < hi; i++ {
 			if c.State[i] != Unaware {
 				continue
+			}
+			if activity != nil {
+				// Asleep: whatever this tick would have shown them waits
+				// until they actually check, the same as a feed confirmation
+				// they have not opened the app to see yet. A fresh RNG draw
+				// per (seed, step, node), so a run replays exactly regardless
+				// of how the parallel chunks were scheduled -- same reasoning
+				// as the Simple branch below.
+				r := newRNG(c.Seed^uint64(c.Step)*0xA57A57A5, uint64(i))
+				if r.f64() >= activity[i] {
+					continue
+				}
 			}
 			nb := g.Neighbours(i)
 			peer := 0

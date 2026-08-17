@@ -1,0 +1,9 @@
+{
+  "name": "populace-borders-decode",
+  "private": true,
+  "description": "One-time TopoJSON -> web/borders.bin conversion. Not part of the running app; see decode.js.",
+  "type": "commonjs",
+  "dependencies": {
+    "topojson-client": "^3.1.0"
+  }
+}

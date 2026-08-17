@@ -529,12 +529,17 @@
         <div class="m"><span class="k">tick</span><span class="v" id="t-tick">&mdash;</span></div>
         <div class="m"><span class="k">speed</span><span class="v" id="t-speed">1&times;</span></div>
         <div class="m"><span class="k">tick cost</span><span class="v" id="t-cost">&mdash;</span></div>
+        <div class="m" id="t-clock-row" style="display:none"><span class="k">world clock</span><span class="v" id="t-clock">&mdash;</span></div>
       </div>
       <p class="note">Space plays and pauses; <b>&rarr;</b> steps one tick while paused.
         There is no step <i>back</i>: rewinding needs a stored copy of every
         persona per tick, which is 20&nbsp;MB a tick at a million people and 3.6&nbsp;GB
         for the history this panel already keeps. The charts below are the
         record of what happened; the world itself only moves forward.</p>
+      <p class="note" id="t-daynight-note" hidden>The clock is UTC. Someone is
+        always awake somewhere, but a story landing on a region's own deep
+        night still spreads slower there until that region wakes into it
+        &mdash; see the &ldquo;what time it breaks&rdquo; experiment preset.</p>
     </section>
 
     <section class="panel">
@@ -595,6 +600,10 @@
           <input id="c-sal" type="range" min="0" max="1" step="0.05" value="0.7"></label>
         <label>seeded share <b id="c-seed-v">1.00%</b>
           <input id="c-seed" type="range" min="0.1" max="4" step="0.1" value="1"></label>
+        <label><span style="display:flex;align-items:center;gap:5px">
+            <input id="c-hour-on" type="checkbox" style="accent-color:var(--teal)">
+            break it at a set time</span> <b id="c-hour-v">09:00 UTC</b>
+          <input id="c-hour" type="range" min="0" max="23" step="1" value="9" disabled></label>
       </div>
       <div class="controls" style="margin-top:9px">
         <select id="c-mode" aria-label="where it starts">
@@ -606,7 +615,8 @@
       </div>
       <p class="note">Coverage is where the reporting sits, not whether the news
       is good for anyone &mdash; those come apart, and the model resolves it per
-      archetype once you ask it.</p>
+      archetype once you ask it. Leave the time unset to break it whenever the
+      world's own clock currently reads.</p>
     </section>
 
     <section class="panel">
@@ -621,6 +631,7 @@
           <option value="seeding">place vs network vs scattered</option>
           <option value="dose">seeded share: 0.4 / 1 / 2%</option>
           <option value="model">with vs without the model</option>
+          <option value="hour">what time it breaks: night / morning / evening</option>
         </select>
         <select id="x-reps" aria-label="replicates">
           <option value="8">8 worlds</option>
@@ -808,6 +819,28 @@ async function pollStats() {
   $('t-cost').textContent = (d.tick_ms ?? 0).toFixed(1) + ' ms';
   $('t-state').textContent = d.running ? 'running' : 'paused';
   $('t-state').style.color = d.running ? 'var(--good)' : 'var(--warn)';
+
+  // The day/night clock -- absent from the payload entirely when the server
+  // was started without it, hidden rather than shown reading a fake 00:00.
+  const hasClock = d.daynight && d.hour_utc != null;
+  // .m sets its own display:flex, which beats the UA [hidden] rule the same
+  // way #chatview's did -- inline style, not the hidden attribute, actually
+  // hides it (see p-feedshare above for the existing precedent).
+  $('t-clock-row').style.display = hasClock ? '' : 'none';
+  $('t-daynight-note').hidden = !hasClock;
+  if (hasClock) {
+    // Rounding the minutes can carry into the next hour (59.6 -> "60"), so
+    // round the total minutes-since-midnight first and derive h/m from that,
+    // rather than rounding h and m independently.
+    const totalMin = Math.round(d.hour_utc * 60) % 1440;
+    const h = Math.floor(totalMin / 60), m = totalMin % 60;
+    $('t-clock').textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} UTC`;
+  }
+  // The composer's "break it at a set time" control only means something if
+  // the server is actually running a clock -- disabled rather than hidden,
+  // so it is still visible as a feature that exists, just not right now.
+  $('c-hour-on').disabled = !hasClock;
+  if (!hasClock) { $('c-hour-on').checked = false; $('c-hour').disabled = true; }
 
   // Feed attribution, shown next to reach because it is a claim *about* reach:
   // of the people who acted, how many needed the algorithm to get there.
@@ -1064,11 +1097,15 @@ $('q-body').addEventListener('click', (e) => {
 for (const [id, fmt] of [['c-stance', v => (+v).toFixed(2)],
                          ['c-diff', v => (+v).toFixed(2)],
                          ['c-sal', v => (+v).toFixed(2)],
-                         ['c-seed', v => (+v).toFixed(2) + '%']]) {
+                         ['c-seed', v => (+v).toFixed(2) + '%'],
+                         ['c-hour', v => String(v).padStart(2, '0') + ':00 UTC']]) {
   const el = $(id);
   const out = $(id + '-v');
   el.addEventListener('input', () => { out.textContent = fmt(el.value); });
 }
+$('c-hour-on').addEventListener('change', () => {
+  $('c-hour').disabled = !$('c-hour-on').checked;
+});
 
 $('c-run').addEventListener('click', async () => {
   const headline = $('c-head').value.trim() ||
@@ -1078,11 +1115,12 @@ $('c-run').addEventListener('click', async () => {
   const salience = +$('c-sal').value;
   const seeding = $('c-mode').value;
   const seed_size = Math.max(200, Math.round(globe.n * (+$('c-seed').value) / 100));
+  const hour = $('c-hour-on').checked ? +$('c-hour').value : undefined;
   current = { headline, stance, difficulty };
   $('hdr').textContent = headline + ' — breaking…';
   try {
     const r = await post('/api/event',
-      { headline, stance, salience, seeding, seed_size, difficulty });
+      { headline, stance, salience, seeding, seed_size, difficulty, hour });
     $('hdr').textContent = `${headline} — breaking in ${r.where}`;
     err.style.display = 'none';
   } catch (e) { fail(e); }
@@ -1112,16 +1150,27 @@ const PRESETS = {
     { label: 'engine only', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
     { label: 'with model reactions', seed_frac: 0.01, difficulty: 1.2, seeding: 0 },
   ],
+  // Same story, same seed set, same everything except the UTC clock at the
+  // moment it breaks -- only meaningful with day/night on, which is why this
+  // is the one preset that sets the request's own daynight flag rather than
+  // leaving it to whatever the live sim happens to be running.
+  hour: () => [
+    { label: 'breaks at 02:00 (deep night)', seed_frac: 0.01, difficulty: 1.2, seeding: 0, has_hour: true, hour: 2 },
+    { label: 'breaks at 09:00 (morning)', seed_frac: 0.01, difficulty: 1.2, seeding: 0, has_hour: true, hour: 9 },
+    { label: 'breaks at 20:00 (evening)', seed_frac: 0.01, difficulty: 1.2, seeding: 0, has_hour: true, hour: 20 },
+  ],
 };
 
 $('x-run').addEventListener('click', async () => {
-  const arms = PRESETS[$('x-preset').value]().map(a => ({
+  const preset = $('x-preset').value;
+  const arms = PRESETS[preset]().map(a => ({
     ...a, salience: +$('c-sal').value, stance: +$('c-stance').value,
   }));
   $('x-out').innerHTML = '';
   try {
     await post('/api/experiment/run', {
       n: 40000, replicates: +$('x-reps').value, rounds: 35, arms,
+      daynight: preset === 'hour',
     });
     err.style.display = 'none';
   } catch (e) { fail(e); }

@@ -42,6 +42,61 @@ func TestDifficultySeparatesArmsWithConfidence(t *testing.T) {
 		c.MeanDiff*100, c.Lo*100, c.Hi*100, res.Runs, res.ElapsedS)
 }
 
+// The paired design applied to the day/night mechanic: the same story,
+// breaking at the seed region's local night versus its local peak activity
+// hour, should reach less early on -- and Config.DayNight has to actually be
+// threaded through to sim.New, or every arm here runs with day/night off and
+// "3am" and "2pm" would be identical requests.
+func TestHourOfBreakingSeparatesArmsWhenDayNightIsOn(t *testing.T) {
+	r := NewRunner()
+	res, err := r.Run(context.Background(), Config{
+		N: 30_000, Replicates: 8, Rounds: 12, BaseSeed: 777, DayNight: true,
+		Arms: []Arm{
+			{Label: "breaks at night", SeedFrac: 0.03, Difficulty: 0.8,
+				Seeding: sim.SeedInRegion, Salience: 0.6, Stance: -0.5,
+				HasHour: true, Hour: 2},
+			{Label: "breaks at midday", SeedFrac: 0.03, Difficulty: 0.8,
+				Seeding: sim.SeedInRegion, Salience: 0.6, Stance: -0.5,
+				HasHour: true, Hour: 14},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.Comparisons[0]
+	t.Logf("midday minus night: %+.1fpp, 95%% CI [%.1f, %.1f], significant=%v",
+		c.MeanDiff*100, c.Lo*100, c.Hi*100, c.Significant)
+	// pairedDiff(against, label, ...) reports label-minus-against -- "midday"
+	// is the label here, "night" is against, so a positive MeanDiff means
+	// midday reached more, which is what breaking into an awake population
+	// should do.
+	if c.MeanDiff <= 0 || !c.Significant {
+		t.Errorf("breaking at midday should reach materially more than breaking at "+
+			"night this early, got %+.4f significant=%v", c.MeanDiff, c.Significant)
+	}
+}
+
+// Confirms the opposite failure mode of the test above: without DayNight set
+// on the Config, an hour on an Arm must not silently do anything.
+func TestHourIsInertWithoutDayNightOnTheConfig(t *testing.T) {
+	r := NewRunner()
+	res, err := r.Run(context.Background(), Config{
+		N: 30_000, Replicates: 6, Rounds: 12, BaseSeed: 778, // DayNight left false
+		Arms: []Arm{
+			{Label: "night", SeedFrac: 0.03, Difficulty: 0.8, Seeding: sim.SeedInRegion,
+				Salience: 0.6, Stance: -0.5, HasHour: true, Hour: 2},
+			{Label: "midday", SeedFrac: 0.03, Difficulty: 0.8, Seeding: sim.SeedInRegion,
+				Salience: 0.6, Stance: -0.5, HasHour: true, Hour: 14},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := res.Comparisons[0]; c.MeanDiff != 0 {
+		t.Errorf("Hour moved the result with DayNight off: diff %.6f", c.MeanDiff)
+	}
+}
+
 // Two identical arms must not look different. This is the test that catches a
 // broken reset: if state leaked between arms, the second arm would run on a
 // population the first one modified and the "identical" arms would separate.

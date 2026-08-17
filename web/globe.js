@@ -128,6 +128,79 @@ void main(){
   o = vec4(mix(globe, plate, u_morph), 1.0);
 }`;
 
+// Country borders: real Natural Earth geometry (via web/borders.bin, decoded
+// offline from the public-domain world-atlas 110m dataset -- see
+// scratchpad/borders/decode.js for the one-time conversion), not a texture.
+// Same lon/lat-radians convention and the same sphere/map morph as the
+// population points, so a border line and a persona dot always agree about
+// where the coastline actually is.
+//
+// Rotation is where line rendering gets genuinely harder than point
+// rendering. The population points wrap each vertex independently with
+// mod(lon+rot+PI, 2PI)-PI, which is fine for points -- each one just teleports
+// a hair, invisible for a single pixel with nothing attached to it. A LINE
+// STRIP is not independent: whenever that per-vertex wrap sends one endpoint
+// of a segment to +180 degrees and its neighbour to -180, the two are still
+// numerically far apart even though the true points are right next to each
+// other, and the rasterizer draws the "short way" as a line clear across the
+// screen. This is not particular to rings that happen to cross the real
+// antimeridian -- since rotation is unbounded, *any* ring's own wrap point
+// sweeps past every one of its edges in turn as it spins.
+//
+// A per-fragment derivative test (discard where fwidth() is large) looks
+// like the fix and is not: a spurious line spans many pixels, so its
+// *per-fragment* derivative is small even though the segment end to end is
+// huge -- confirmed empirically (see the panned-map screenshots this
+// comment replaced). The actual fix has to compare a segment's two
+// endpoints, which one vertex-shader invocation never sees on its own.
+//
+// The fix: every vertex in a ring also carries a_anchor, that ring's own
+// first raw longitude (set once at load time, identical for every vertex in
+// the ring). Each vertex computes its position not by wrapping itself
+// independently, but by wrapping the *anchor* and adding its own
+// rotation-invariant shortest-path offset from that anchor. Two vertices
+// anchored to the same reference can never land on opposite sides of the
+// branch cut from each other, because they are both measured from one
+// consistently-wrapped point -- and no real country's own longitude span
+// (even Russia's) exceeds the +/-180 degree reach of one shortest-path
+// offset, so nothing is ever cut off by this on the sphere. On the flat map
+// a ring anchored near the map's own edge can draw a few degrees past that
+// edge rather than wrapping to the other side, which is a country clipped
+// at the seam instead of a line drawn through the world -- the failure mode
+// worth having.
+const BORDER_VS = `#version 300 es
+layout(location=0) in vec2  a_ll;      // this vertex, raw lon/lat radians
+layout(location=1) in float a_anchor;  // this ring's own raw lon, radians
+uniform float u_rot, u_radius, u_morph, u_zoom, u_mapy;
+uniform vec2  u_res, u_pan;
+out float v_face;
+const float PI = 3.14159265359;
+void main(){
+  float lonRef = mod(a_anchor + u_rot + PI, 2.0*PI) - PI;
+  float delta  = mod(a_ll.x - a_anchor + PI, 2.0*PI) - PI;
+  float lon = lonRef + delta;
+  float lat = a_ll.y;
+  float cl  = cos(lat);
+
+  vec3  sp   = vec3(cl*sin(lon), sin(lat), cl*cos(lon));
+  vec2  sNDC = sp.xy * u_radius / (u_res*0.5);
+  vec2  mNDC = vec2(lon/PI * 0.92, lat/(PI*0.5) * u_mapy);
+
+  vec2 ndc = mix(sNDC, mNDC, u_morph);
+  v_face = mix(sp.z, 1.0, u_morph);
+  gl_Position = vec4(ndc * u_zoom + u_pan, 0.0, 1.0);
+}`;
+
+const BORDER_FS = `#version 300 es
+precision highp float;
+in float v_face;
+out vec4 o;
+void main(){
+  if (v_face <= 0.02) discard;
+  // Thin and quiet on purpose -- this is context for the population, not data.
+  o = vec4(1.0, 1.0, 1.0, 0.22 * (0.3 + 0.7 * v_face));
+}`;
+
 function compile(gl, type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
@@ -168,10 +241,15 @@ export class Globe {
 
     this.pPts = link(gl, VS, FS);
     this.pBody = link(gl, BODY_VS, BODY_FS);
+    this.pBorder = link(gl, BORDER_VS, BORDER_FS);
     this.uPts = uniforms(gl, this.pPts,
       ['u_rot','u_radius','u_res','u_size','u_morph','u_zoom','u_pan','u_mapy']);
     this.uBody = uniforms(gl, this.pBody,
       ['u_radius','u_res','u_morph','u_zoom','u_pan','u_mapy']);
+    this.uBorder = uniforms(gl, this.pBorder,
+      ['u_rot','u_radius','u_res','u_morph','u_zoom','u_pan','u_mapy']);
+    this.borderCount = 0;
+    this.loadBorders();
 
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -252,6 +330,82 @@ export class Globe {
   setView(v) { this.morphTo = v === 'map' ? 1 : 0; }
   setSpin(on) { this.spin = on && !this.reduce; }
   resetView() { this.zoom = 1; this.pan = [0, 0]; this.rot = 0; }
+
+  // Fetched once, independent of the population load -- borders are a fixed
+  // ~80KB asset (real Natural Earth coastlines at 110m resolution, see
+  // BORDER_VS's comment for why they're stored pre-decoded rather than as
+  // TopoJSON), not something that scales with -n. A failure here (offline
+  // dev server without the asset, say) just means no borders draw; it must
+  // never take the population view down with it.
+  async loadBorders() {
+    let buf;
+    try {
+      const res = await fetch('/borders.bin');
+      if (!res.ok) throw new Error(`borders.bin: ${res.status}`);
+      buf = await res.arrayBuffer();
+    } catch (e) {
+      console.warn('country borders not loaded:', e);
+      return;
+    }
+    const gl = this.gl;
+    const dv = new DataView(buf);
+    const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+    if (magic !== 'PBD1') { console.warn(`bad borders stream magic: ${magic}`); return; }
+    const numRings = dv.getUint32(4, true);
+
+    // One giant position buffer plus one index buffer using WebGL2's
+    // fixed primitive-restart index (0xFFFF for UNSIGNED_SHORT) between
+    // rings -- every ring in one draw call, the same "one call" discipline
+    // the population points already follow.
+    let totalVerts = 0;
+    { let off = 8; for (let r = 0; r < numRings; r++) { const nv = dv.getUint32(off, true); totalVerts += nv; off += 4 + nv * 8; } }
+    if (totalVerts >= 0xFFFF) { console.warn('borders: too many vertices for a 16-bit restart index'); return; }
+
+    const positions = new Float32Array(totalVerts * 2);
+    // Every vertex in a ring repeats that ring's own first raw longitude --
+    // see BORDER_VS's comment for why the shader needs this to keep a whole
+    // ring wrapped consistently under rotation.
+    const anchors = new Float32Array(totalVerts);
+    const indices = new Uint16Array(totalVerts + numRings); // +1 restart marker per ring
+    let voff = 8, pw = 0, iw = 0, vertBase = 0;
+    for (let r = 0; r < numRings; r++) {
+      const nv = dv.getUint32(voff, true); voff += 4;
+      const anchorLon = dv.getFloat32(voff, true);
+      for (let k = 0; k < nv; k++) {
+        positions[pw++] = dv.getFloat32(voff, true); voff += 4;
+        positions[pw++] = dv.getFloat32(voff, true); voff += 4;
+        anchors[vertBase + k] = anchorLon;
+        indices[iw++] = vertBase + k;
+      }
+      indices[iw++] = 0xFFFF;
+      vertBase += nv;
+    }
+
+    this.bBorderPos = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBorderPos);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    this.bBorderAnchor = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBorderAnchor);
+    gl.bufferData(gl.ARRAY_BUFFER, anchors, gl.STATIC_DRAW);
+    this.bBorderIdx = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bBorderIdx);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+    this.vaoBorder = gl.createVertexArray();
+    gl.bindVertexArray(this.vaoBorder);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBorderPos);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBorderAnchor);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bBorderIdx);
+    gl.bindVertexArray(null);
+
+    this.borderCount = iw;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  }
 
   // Takes the raw ArrayBuffer from /api/instances. The position attribute is
   // read directly out of the packed record with a stride -- the bytes are
@@ -418,6 +572,20 @@ export class Globe {
       gl.uniform1f(this.uBody.u_mapy, this.mapY);
       gl.uniform2f(this.uBody.u_pan, this.pan[0], this.pan[1]);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Between the ground and the population: context under the data.
+      if (this.borderCount) {
+        gl.useProgram(this.pBorder);
+        gl.bindVertexArray(this.vaoBorder);
+        gl.uniform1f(this.uBorder.u_rot, this.rot);
+        gl.uniform1f(this.uBorder.u_radius, this.R);
+        gl.uniform2f(this.uBorder.u_res, this.W, this.H);
+        gl.uniform1f(this.uBorder.u_morph, this.morph);
+        gl.uniform1f(this.uBorder.u_zoom, this.zoom);
+        gl.uniform1f(this.uBorder.u_mapy, this.mapY);
+        gl.uniform2f(this.uBorder.u_pan, this.pan[0], this.pan[1]);
+        gl.drawElements(gl.LINE_STRIP, this.borderCount, gl.UNSIGNED_SHORT, 0);
+      }
 
       if (this.n) {
         gl.useProgram(this.pPts);
