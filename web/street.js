@@ -40,6 +40,33 @@ function colorFor(res) {
   return `rgb(${r},${g},${b})`;
 }
 
+// The same "little person" silhouette as the globe's point sprite (see
+// BORDER_VS/FS's neighbour in globe.js) -- a head circle and a rounded body,
+// so a dot here and a dot on the globe read as the same kind of mark. Traced
+// as one path (two subpaths, filled together) rather than two separate
+// fill() calls, so the join has no double-drawn seam where they overlap.
+// Same ratios as globe.js's BORDER_VS neighbour, the point-sprite silhouette
+// (head circle radius 0.15, body capsule radius 0.19, in a point-space where
+// the sprite spans +/-0.5) -- r here plays the role of that 0.5 half-width,
+// so a dot here and a dot on the globe are the same shape at a different
+// scale, not two separate guesses at "person". Shoulders wider than the
+// head is what actually reads as a person rather than a balloon on a stick;
+// getting that backwards was the first version of this function.
+function personPath(ctx, cx, cy, r) {
+  const headR = 0.30 * r;
+  const headCy = cy - 0.48 * r;
+  const bodyR = 0.38 * r;          // body's half-width and stadium-cap radius
+  const bodyTop = cy - 0.44 * r;
+  const bodyH = 1.46 * r;
+  ctx.beginPath();
+  ctx.arc(cx, headCy, headR, 0, Math.PI * 2);
+  if (ctx.roundRect) {
+    ctx.roundRect(cx - bodyR, bodyTop, bodyR * 2, bodyH, bodyR);
+  } else {
+    ctx.rect(cx - bodyR, bodyTop, bodyR * 2, bodyH);
+  }
+}
+
 export class StreetView {
   constructor(canvas, tip) {
     this.cv = canvas;
@@ -129,11 +156,10 @@ export class StreetView {
     }
     ctx.stroke();
 
-    const r0 = 4.5 * this.dpr;
+    const r0 = 5.5 * this.dpr;
     for (let i = 0; i < res.length; i++) {
       const p = this.pts[i], hot = i === this.hover;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, hot ? r0 * 1.7 : r0, 0, Math.PI * 2);
+      personPath(ctx, p.x, p.y, hot ? r0 * 1.5 : r0);
       ctx.fillStyle = colorFor(res[i]);
       ctx.fill();
       if (hot) {

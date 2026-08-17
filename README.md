@@ -282,6 +282,27 @@ country's longitude span (even Russia's, the extreme case) exceeds what one
 shortest-path offset can represent. See the comment on `BORDER_VS` in
 `web/globe.js`.
 
+## Every dot is a little person, not a square
+
+`gl.POINTS` with no fragment mask draws the raw quad -- every square you
+see anywhere in this app's history of screenshots was that default, never a
+deliberate choice. The population's shape is now a person: one circle
+(head) unioned with one capsule (body) via a signed-distance-field minimum
+in the point fragment shader, two cheap primitives and one `fwidth()`-based
+antialiased edge, so a world at rest still costs what a plain dot did.
+Below the pixel this shape can actually resolve at (population scale,
+zoomed all the way out) it looks exactly like the old dot, correctly --
+there is no shape information below one pixel to lose. Zoom in and it
+resolves into a small crowd of individually-shaped figures, coloured the
+same way they always were. Getting the proportions right took a wrong turn
+worth naming: the first version made the head circle *wider* than the
+body, which reads as a balloon on a stick rather than a person -- shoulders
+wider than the head is the part that actually carries the read. Street
+level's Canvas2D roster (`web/street.js`) draws the identical ratios at a
+different scale, so a resident there and a dot on the globe are the same
+shape, not two separate guesses at "person". See `FS` in `web/globe.js` and
+`personPath` in `web/street.js`.
+
 ## What is not here, and why
 
 **Step back.** Rewinding needs a stored copy of every persona per tick: 20 MB a

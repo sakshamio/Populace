@@ -57,7 +57,12 @@ void main(){
   v_fresh = ((a_flags & 1024u) != 0u) ? 1.0 : 0.0;
 
   gl_Position  = vec4(ndc * u_zoom + u_pan, 0.0, 1.0);
-  gl_PointSize = (u_size + v_media * 1.6) * max(1.0, u_zoom * 0.75);
+  // The zoomed-in multiplier is bigger than it needs to be for a plain dot
+  // on purpose: a person-shaped silhouette needs real pixels to read as one
+  // rather than a blob, and zooming in on the globe is exactly the moment
+  // that payoff should land. Barely changes the population-scale size at
+  // zoom 1 (max(1.0, 1*1.2) vs the old max(1.0, 1*0.75) is the same clamp).
+  gl_PointSize = (u_size + v_media * 1.6) * max(1.0, u_zoom * 1.2);
 }`;
 
 // Three channels in one dot, which is why opinion, adoption, and channel are
@@ -69,12 +74,54 @@ void main(){
 // Colours match the CSS tokens exactly (--against, --favour, --feed) so a dot
 // on the globe and a chip in the sidebar read as the same fact rather than as
 // two designers' guesses at "roughly blue" and "roughly orange".
+//
+// The shape is a person, not a square. gl.POINTS with no fragment mask draws
+// the raw quad -- a population of little squares, which reads as a
+// placeholder rather than as people. A circle would already be an
+// improvement, but this app draws named individuals at every other zoom
+// level (the group chat, street level); the globe is the one place ten
+// million of them are visible at once, and it should still look like people
+// once you zoom in far enough to see individuals rather than a haze. The
+// silhouette is one circle (head) unioned with one capsule (body) via a
+// distance-field minimum -- two cheap primitives, no texture, no branch
+// beyond the existing backface discard, so a world at rest still costs
+// exactly what a plain dot did. Below the pixel a shape can actually resolve
+// at (zoomed out to population scale) this is indistinguishable from the old
+// dot, which is correct: there is no shape information below one pixel to
+// lose.
 const FS = `#version 300 es
 precision highp float;
 in float v_state, v_op, v_media, v_face, v_feed, v_fresh;
 out vec4 o;
+
+// Distance from p to the segment a-b, minus radius r -- a capsule, used here
+// as the body so the silhouette has no sharp corners at any size.
+float capsule(vec2 p, vec2 a, vec2 b, float r) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+  return length(pa - ba * h) - r;
+}
+
 void main(){
   if (v_face <= 0.02) discard;         // backface cull: one dot product
+
+  // gl_PointCoord is [0,1] with y increasing downward; recentre on the point
+  // and flip so a bigger p.y is up, the way every one of these little
+  // billboarded people should face regardless of where on the globe they are.
+  vec2 p = gl_PointCoord - 0.5;
+  p.y = -p.y;
+  float dHead = length(p - vec2(0.0, 0.24)) - 0.15;
+  float dBody = capsule(p, vec2(0.0, 0.03), vec2(0.0, -0.32), 0.19);
+  float d = min(dHead, dBody);
+  // Antialiased edge rather than a hard discard: at 15-25px, the size most
+  // points actually render at once zoomed in enough to see this shape, a
+  // binary mask reads as a jagged blob. fwidth(d) is the distance field's own
+  // rate of change per screen pixel, so the softened band is always about
+  // one pixel wide regardless of point size.
+  float edge = fwidth(d);
+  float alpha = 1.0 - smoothstep(-edge, edge, d);
+  if (alpha < 0.02) discard;
+
   vec3 against = vec3(0.298,0.494,1.000);   // #4C7EFF
   vec3 neutral = vec3(0.400,0.450,0.580);
   vec3 favour  = vec3(1.000,0.604,0.239);   // #FF9A3D
@@ -94,7 +141,7 @@ void main(){
   if (v_feed > 0.5)  c = mix(c, vec3(0.761,0.310,0.820), 0.55);   // #C24FD1
   if (v_fresh > 0.5) lum *= 1.9;       // touched by a feed on this very tick
 
-  o = vec4(c * lum * (0.42 + 0.58*v_face), 1.0);
+  o = vec4(c * lum * (0.42 + 0.58*v_face), alpha);
 }`;
 
 const BODY_VS = `#version 300 es
@@ -250,6 +297,13 @@ export class Globe {
       ['u_rot','u_radius','u_res','u_morph','u_zoom','u_pan','u_mapy']);
     this.borderCount = 0;
     this.loadBorders();
+    // Needed for both the border lines' partial alpha and the population
+    // points' own antialiased silhouette edge -- enabled here rather than
+    // inside loadBorders' success path, since points draw every frame
+    // regardless of whether borders.bin ever loads. Harmless for anything
+    // still drawing alpha 1: srcAlpha*1 + dst*0 is exactly opaque.
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -403,8 +457,6 @@ export class Globe {
     gl.bindVertexArray(null);
 
     this.borderCount = iw;
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   }
 
   // Takes the raw ArrayBuffer from /api/instances. The position attribute is
